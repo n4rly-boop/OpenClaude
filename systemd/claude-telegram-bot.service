@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenClaude Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Change this to your username
+User=your-username-here
+WorkingDirectory=/path/to/OpenClaude
+ExecStart=/usr/bin/python3 /path/to/OpenClaude/telegram-bot.py
+Restart=always
+RestartSec=10
+
+# Environment
+EnvironmentFile=/path/to/OpenClaude/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openclaude
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/path/to/OpenClaude %h/.openclaude-sessions.json %h/.claude /tmp
+
+[Install]
+WantedBy=multi-user.target

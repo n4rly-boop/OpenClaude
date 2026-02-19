@@ -1,0 +1,40 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Session data
+.telegram-claude-sessions.json
+~/.openclaude-sessions.json
+
+# Uploads (keep directory)
+uploads/*
+!uploads/.gitkeep
+
+# Memory contents (keep directory)
+memory/*
+!memory/.gitkeep
+
+# Media files
+*.ogg
+*.wav
+*.mp3
+*.mp4
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
