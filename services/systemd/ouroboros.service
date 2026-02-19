@@ -5,7 +5,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/OpenClaude
-ExecStart=/usr/bin/bash /path/to/OpenClaude/ouroboros.sh
+ExecStart=/usr/bin/bash /path/to/OpenClaude/bin/ouroboros.sh
 Restart=always
 RestartSec=10
 Environment=OUROBOROS_INTERVAL=30
