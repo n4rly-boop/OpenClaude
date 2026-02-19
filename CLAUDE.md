@@ -19,7 +19,10 @@ Only after reading these files should you respond to the human.
 
 ## Memory System
 
-You have two types of memory:
+Memory is **auto-injected at session start** via a SessionStart hook in `.claude/settings.json`.
+You do not need to manually read memory files — the hook outputs both `memory/MEMORY.md` and today's `memory/YYYY-MM-DD.md` into your context automatically.
+
+Your job is to **write** to memory when appropriate.
 
 ### Long-term Memory — `memory/MEMORY.md`
 - Persistent facts, preferences, and context that matter across days
@@ -29,7 +32,7 @@ You have two types of memory:
 
 ### Daily Memory — `memory/YYYY-MM-DD.md`
 - What happened today: conversations, tasks, decisions, learnings
-- Created fresh each day on first interaction
+- Create/append on first noteworthy interaction of the day
 - More detailed than long-term memory — it's your daily journal
 
 ### When to Write Memory

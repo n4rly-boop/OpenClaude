@@ -15,5 +15,14 @@
   },
   "settings": {
     "working_directory": "."
+  },
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "bash -c 'echo \"=== LONG-TERM MEMORY ===\"; cat memory/MEMORY.md 2>/dev/null || echo \"(no long-term memory yet)\"; echo; echo \"=== TODAY MEMORY ===\"; cat memory/$(date +%Y-%m-%d).md 2>/dev/null || echo \"(no entries today yet)\"'"
+      }]
+    }]
   }
 }
