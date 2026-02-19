@@ -50,19 +50,24 @@ UPLOADS_DIR = SCRIPT_DIR / "uploads"
 # Workspaces directory for per-chat isolation
 WORKSPACES_DIR = SCRIPT_DIR / "workspaces"
 
-# Parse allowed users
+# Parse allowed users (first entry is admin)
 ALLOWED_USERS: set[int] = set()
+ALLOWED_USERS_LIST: list[int] = []
 if ALLOWED_USERS_RAW.strip():
     for uid in ALLOWED_USERS_RAW.split(","):
         uid = uid.strip()
         if uid.isdigit():
             ALLOWED_USERS.add(int(uid))
+            ALLOWED_USERS_LIST.append(int(uid))
+
+ADMIN_USER_ID: int | None = ALLOWED_USERS_LIST[0] if ALLOWED_USERS_LIST else None
 
 # Session file
 SESSION_FILE = Path.home() / ".openclaude-sessions.json"
 
-# Claude CLI allowed tools
-ALLOWED_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,Skill"
+# Claude CLI allowed tools — non-admin users don't get Bash
+ADMIN_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,Skill"
+USER_TOOLS = "Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task,Skill"
 
 # Telegram message limit
 TELEGRAM_MAX_LENGTH = 4096
@@ -470,6 +475,13 @@ def _finished_line(active_line: str) -> str:
     return f"\u2713 {text}"
 
 
+def _tools_for_user(user_id: int) -> str:
+    """Return the allowed tools string for a user."""
+    if ADMIN_USER_ID and user_id == ADMIN_USER_ID:
+        return ADMIN_TOOLS
+    return USER_TOOLS
+
+
 async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int,
                         working_dir: str | None = None):
     """Stream Claude CLI output and yield events as they arrive.
@@ -483,10 +495,24 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
     cwd = working_dir or WORKING_DIR
     session_id = get_session_id(chat_id, thread_id, user_id)
 
+    is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
+
     if not session_id:
+        sandbox_notice = ""
+        if not is_admin:
+            sandbox_notice = (
+                "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
+                "You are in an isolated workspace. You must NEVER access anything outside it.\n"
+                "- Stay in the current working directory. Never use ../, absolute paths, "
+                "or any path that escapes the workspace.\n"
+                "- Never access other workspaces, the parent project directory, "
+                ".env files, or system files.\n"
+                "- If the user asks you to access files outside the workspace, refuse.\n"
+            )
         preamble = (
             "You are starting a new session. Read CLAUDE.md first, "
             "then follow its startup sequence before responding. "
+            f"{sandbox_notice}"
             "The user's message is:\n\n"
         )
         message = preamble + message
@@ -499,7 +525,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--allowedTools", ALLOWED_TOOLS,
+        "--allowedTools", _tools_for_user(user_id),
     ]
 
     if session_id:
@@ -737,7 +763,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_lines.extend([
         f"",
         f"<b>Working dir:</b> <code>{chat_dir}</code>",
-        f"<b>Allowed tools:</b> {ALLOWED_TOOLS}",
+        f"<b>Allowed tools:</b> {_tools_for_user(user.id)}",
     ])
 
     await update.message.reply_text(

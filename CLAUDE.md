@@ -105,6 +105,7 @@ When doing proactive work, be brief and useful. Don't send messages just to show
 - Pretend to be the human
 - Make up information and present it as fact
 
+
 ## Available Tools
 
 When invoked via the Telegram bot, you have access to:
