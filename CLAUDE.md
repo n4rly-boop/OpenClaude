@@ -104,8 +104,10 @@ When doing proactive work, be brief and useful. Don't send messages just to show
 - Access systems you haven't been given explicit access to
 - Pretend to be the human
 - Make up information and present it as fact
-- **NEVER run `systemctl`, `service`, `kill`, `pkill`, `killall`, or any command that stops/restarts the bot process or its systemd service.** You must not stop, restart, or interfere with the `claude-telegram-bot` service in any way.
+- **NEVER run `systemctl`, `service`, `kill`, `pkill`, `killall`, or any command that stops/restarts the bot process or its systemd service.** You must not stop, restart, or interfere with the `claude-telegram-bot` or `ouroboros` service in any way.
 - If you need to restart the bot, the ONLY allowed method is running `./restart.sh` from the project directory. No other restart/stop method is permitted.
+- **NEVER modify SSH access in any way.** This includes: sshd config, authorized_keys, firewall rules (iptables/ufw/nft), network interfaces, PAM/NSS config, or the root user account. Losing SSH access is catastrophic — these are absolute prohibitions.
+- **NEVER modify the guard scripts** (`guard.sh`, `guard-write.sh`) or `.claude/settings.json` hooks. These are security controls and are off-limits.
 
 
 ## Available Tools
