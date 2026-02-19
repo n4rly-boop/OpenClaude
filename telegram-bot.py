@@ -20,7 +20,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -320,15 +320,69 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
 
 
 # ---------------------------------------------------------------------------
-# Claude CLI Integration
+# Claude CLI Integration — Streaming
 # ---------------------------------------------------------------------------
 
+# Minimum interval between Telegram message edits (seconds) to avoid rate limits
+STATUS_EDIT_INTERVAL = 1.5
 
-async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) -> str:
-    """Call the Claude CLI with a message and return the response text."""
+
+def format_tool_status(tool_name: str, tool_input: dict) -> str:
+    """Format a human-readable status line for an active tool call."""
+    if tool_name == "Read":
+        path = tool_input.get("file_path", "file")
+        return f"\U0001f4c4 Reading {Path(path).name}..."
+    if tool_name == "Glob":
+        pattern = tool_input.get("pattern", "")
+        return f"\U0001f50d Searching {pattern}..."
+    if tool_name == "Grep":
+        pattern = tool_input.get("pattern", "")
+        return f'\U0001f50d Searching for "{pattern}"...'
+    if tool_name == "Bash":
+        desc = tool_input.get("description", "")
+        if desc:
+            return f"\u2699\ufe0f {desc}"
+        return "\u2699\ufe0f Running command..."
+    if tool_name in ("Write", "Edit"):
+        path = tool_input.get("file_path", "file")
+        return f"\u270f\ufe0f Editing {Path(path).name}..."
+    if tool_name == "WebSearch":
+        return "\U0001f310 Searching web..."
+    if tool_name == "WebFetch":
+        url = tool_input.get("url", "")
+        return f"\U0001f310 Fetching {url[:60]}..."
+    if tool_name == "Task":
+        return "\U0001f916 Delegating to sub-agent..."
+    return f"\U0001f527 Using {tool_name}..."
+
+
+def _finished_line(active_line: str) -> str:
+    """Convert an active tool status line to a finished (checkmark) line.
+
+    Strips the leading emoji and trailing '...' and prepends a checkmark.
+    """
+    # Remove leading emoji (first character + possible variation selector)
+    text = active_line
+    # Skip first emoji cluster (up to first space)
+    idx = text.find(" ")
+    if idx != -1:
+        text = text[idx + 1:]
+    # Strip trailing '...'
+    text = text.rstrip(".")
+    return f"\u2713 {text}"
+
+
+async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int):
+    """Stream Claude CLI output and yield events as they arrive.
+
+    Yields dicts with keys:
+      - {"type": "tool_use", "status": "📄 Reading file..."}
+      - {"type": "tool_result"}
+      - {"type": "result", "text": "...", "session_id": "..."}
+      - {"type": "error", "text": "..."}
+    """
     session_id = get_session_id(chat_id, thread_id, user_id)
 
-    # On first message in a session, prepend instructions to read prompt files
     if not session_id:
         preamble = (
             "You are starting a new session. Read CLAUDE.md first, "
@@ -342,7 +396,9 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
     cmd = [
         claude_bin,
         "-p", message,
-        "--output-format", "json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
         "--allowedTools", ALLOWED_TOOLS,
     ]
 
@@ -353,14 +409,15 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
         cmd.extend(["--model", CLAUDE_MODEL])
 
     logger.info(
-        "Calling Claude for user %d (session: %s)",
+        "Calling Claude (streaming) for user %d (session: %s)",
         user_id,
         session_id or "new",
     )
 
     try:
         env = os.environ.copy()
-        # Ensure claude CLI is findable even when launched from systemd/cron
+        env.pop("CLAUDECODE", None)
+        env["IS_SANDBOX"] = "1"
         local_bin = str(Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
@@ -373,68 +430,91 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
             env=env,
         )
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=CLAUDE_TIMEOUT
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
-            return "Claude took too long to respond. Try again or /new to start fresh."
+        result_text = None
+        new_session_id = None
+        deadline = asyncio.get_event_loop().time() + CLAUDE_TIMEOUT
+
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                proc.kill()
+                await proc.communicate()
+                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+                return
+
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+                return
+
+            if not line:
+                break  # EOF
+
+            decoded = line.decode().strip()
+            if not decoded:
+                continue
+
+            try:
+                event = json.loads(decoded)
+            except json.JSONDecodeError:
+                logger.debug("Non-JSON line from Claude: %s", decoded[:200])
+                continue
+
+            event_type = event.get("type")
+
+            if event_type == "assistant":
+                msg = event.get("message", {})
+                content = msg.get("content", [])
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        status = format_tool_status(
+                            block.get("name", ""),
+                            block.get("input", {}),
+                        )
+                        yield {"type": "tool_use", "status": status}
+
+            elif event_type == "tool_result":
+                yield {"type": "tool_result"}
+
+            elif event_type == "result":
+                result_text = event.get("result", "")
+                new_session_id = event.get("session_id")
+                if new_session_id:
+                    set_session_id(chat_id, thread_id, user_id, new_session_id)
+                    logger.info("Session updated for user %d: %s", user_id, new_session_id)
+                yield {"type": "result", "text": result_text, "session_id": new_session_id}
+
+        # Wait for process to finish
+        await proc.wait()
 
         if proc.returncode != 0:
-            error_msg = stderr.decode().strip() if stderr else "Unknown error"
+            stderr_data = await proc.stderr.read()
+            error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
             logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
-            return f"Claude CLI error:\n{error_msg}"
+            if result_text is None:
+                yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
+            return
 
-        raw = stdout.decode().strip()
-        if not raw:
-            return "Claude returned an empty response."
-
-        # Parse JSON output
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            # If it's not valid JSON, return raw text
-            logger.warning("Claude returned non-JSON output")
-            return raw
-
-        # Extract session ID for continuity
-        new_session_id = data.get("session_id")
-        if new_session_id:
-            set_session_id(chat_id, thread_id, user_id, new_session_id)
-            logger.info("Session updated for user %d: %s", user_id, new_session_id)
-
-        # Extract the response text
-        result_text = data.get("result", "")
-
-        # If result is empty, try to find text in other fields
-        if not result_text:
-            # Check for content blocks
-            if "content" in data:
-                parts = []
-                for block in data["content"]:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(block["text"])
-                    elif isinstance(block, str):
-                        parts.append(block)
-                result_text = "\n".join(parts)
-
-        if not result_text:
-            result_text = "Claude processed the request but returned no text output."
-
-        return result_text
+        # If we never got a result event
+        if result_text is None:
+            logger.warning("No result event received from stream")
+            yield {"type": "error", "text": "Claude returned no result."}
 
     except FileNotFoundError as e:
-        logger.exception("FileNotFoundError in call_claude: %s", e)
-        return (
-            "Error: Claude CLI not found. "
-            "Make sure 'claude' is installed and available in PATH."
-        )
+        logger.exception("FileNotFoundError in stream_claude: %s", e)
+        yield {
+            "type": "error",
+            "text": "Error: Claude CLI not found. "
+                    "Make sure 'claude' is installed and available in PATH.",
+        }
     except Exception as e:
-        logger.exception("Unexpected error calling Claude")
-        return f"Unexpected error: {e}"
+        logger.exception("Unexpected error streaming Claude")
+        yield {"type": "error", "text": f"Unexpected error: {e}"}
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +646,82 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              chat_id: int, thread_id: int, user_id: int,
+                              claude_message: str) -> None:
+    """Stream Claude output, show tool progress via an editable status message, then send final response."""
+    tg_thread_id = thread_id or None
+    status_msg = None         # The editable Telegram status message
+    finished_lines: list[str] = []  # Lines with checkmarks for completed tools
+    current_active: str = ""  # The currently-active tool line
+    last_edit_time: float = 0
+
+    async def _update_status(new_active: str = "") -> None:
+        """Edit the status message with current tool progress."""
+        nonlocal status_msg, current_active, last_edit_time
+        current_active = new_active
+        lines = list(finished_lines)
+        if current_active:
+            lines.append(current_active)
+        if not lines:
+            return
+
+        text = "\n".join(lines)
+
+        now = asyncio.get_event_loop().time()
+        if status_msg and (now - last_edit_time) < STATUS_EDIT_INTERVAL:
+            return  # Rate-limit edits
+
+        try:
+            if status_msg is None:
+                status_msg = await update.message.reply_text(
+                    text,
+                    message_thread_id=tg_thread_id,
+                )
+            else:
+                await status_msg.edit_text(text)
+            last_edit_time = asyncio.get_event_loop().time()
+        except Exception:
+            # Silently ignore edit failures (e.g., message unchanged)
+            pass
+
+    response_text = None
+
+    async with _get_user_lock(user_id):
+        async for event in stream_claude(claude_message, chat_id, thread_id, user_id):
+            etype = event.get("type")
+
+            if etype == "tool_use":
+                # Mark previous active tool as finished
+                if current_active:
+                    finished_lines.append(_finished_line(current_active))
+                await _update_status(event["status"])
+
+            elif etype == "tool_result":
+                # Mark current tool as finished
+                if current_active:
+                    finished_lines.append(_finished_line(current_active))
+                    await _update_status("")
+
+            elif etype == "result":
+                response_text = event.get("text", "")
+
+            elif etype == "error":
+                response_text = event.get("text", "An error occurred.")
+
+    # Clean up status message
+    if status_msg:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+    # Send final response
+    if response_text is None:
+        response_text = "Claude processed the request but returned no text output."
+    await send_rendered(update, response_text, context)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages — route to Claude."""
     user = update.effective_user
@@ -596,66 +752,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         len(message_text),
     )
 
-    # Continuous typing indicator
-    stop_typing = asyncio.Event()
-
-    async def keep_typing():
-        while not stop_typing.is_set():
-            try:
-                await update.message.chat.send_action(ChatAction.TYPING)
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
-            except asyncio.TimeoutError:
-                pass
-
-    typing_task = asyncio.create_task(keep_typing())
-
-    try:
-        # Per-user lock prevents concurrent Claude calls for the same user
-        async with _get_user_lock(user.id):
-            response = await call_claude(message_text, chat_id, thread_id, user.id)
-
-        stop_typing.set()
-        await typing_task
-        await send_rendered(update, response, context)
-    except Exception:
-        stop_typing.set()
-        await typing_task
-        raise
-
-
-async def _run_with_typing(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                           chat_id: int, thread_id: int, user_id: int,
-                           claude_message: str) -> None:
-    """Shared helper: show typing indicator, call Claude under per-user lock, send response."""
-    stop_typing = asyncio.Event()
-
-    async def keep_typing():
-        while not stop_typing.is_set():
-            try:
-                await update.message.chat.send_action(ChatAction.TYPING)
-            except Exception:
-                pass
-            try:
-                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
-            except asyncio.TimeoutError:
-                pass
-
-    typing_task = asyncio.create_task(keep_typing())
-
-    try:
-        async with _get_user_lock(user_id):
-            response = await call_claude(claude_message, chat_id, thread_id, user_id)
-
-        stop_typing.set()
-        await typing_task
-        await send_rendered(update, response, context)
-    except Exception:
-        stop_typing.set()
-        await typing_task
-        raise
+    await _run_with_streaming(update, context, chat_id, thread_id, user.id, message_text)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -696,7 +793,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User also wrote: "{caption}"'
 
-    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -740,7 +837,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -785,7 +882,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 # ---------------------------------------------------------------------------
