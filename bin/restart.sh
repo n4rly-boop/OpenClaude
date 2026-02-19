@@ -7,8 +7,12 @@ BOT_SERVICE="claude-telegram-bot"
 
 echo "Restarting bot..."
 
-# Write restart marker so the bot can detect a controlled restart
-echo "{\"timestamp\": $(date +%s)}" > "$PROJECT_DIR/.restart-marker"
+# Snapshot active streams before the bot's finally blocks can empty them
+cp "$PROJECT_DIR/.active-streams.json" "$PROJECT_DIR/.restart-state.json" 2>/dev/null || true
+
+# Notify users with active generations
+"$SCRIPT_DIR/notify-interrupted.sh" "$PROJECT_DIR/.restart-state.json" \
+    "Restarting — back in a moment..." 2>/dev/null || true
 
 if command -v systemctl &>/dev/null && systemctl --user is-active "$BOT_SERVICE" &>/dev/null 2>&1; then
     systemctl --user restart "$BOT_SERVICE"

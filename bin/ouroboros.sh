@@ -7,7 +7,8 @@ SERVICE="claude-telegram-bot"
 CHECK_INTERVAL="${OUROBOROS_INTERVAL:-30}"
 
 # Resolve project root (parent of bin/)
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLEANUP_MARKER="$PROJECT_DIR/.last-log-cleanup"
 CLEANUP_INTERVAL=3600  # 1 hour in seconds
 
@@ -16,6 +17,11 @@ echo "Ouroboros watching $SERVICE (every ${CHECK_INTERVAL}s)"
 while true; do
     if ! systemctl --user is-active "$SERVICE" &>/dev/null; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] $SERVICE is dead — reviving..."
+
+        # Notify users who had active generations when the bot crashed
+        "$SCRIPT_DIR/notify-interrupted.sh" "$PROJECT_DIR/.active-streams.json" \
+            "Something went wrong — restarting..." 2>/dev/null || true
+
         systemctl --user start "$SERVICE"
         sleep 5
         if systemctl --user is-active "$SERVICE" &>/dev/null; then
@@ -38,19 +44,7 @@ while true; do
 
     if $_do_cleanup; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] Running log cleanup..."
-        # Delete rotated workspace logs older than 3 days
-        find "$PROJECT_DIR/workspaces/" -name "*.log.*" -mtime +3 -delete 2>/dev/null || true
-        # Delete rotated infra logs older than 7 days
-        find "$PROJECT_DIR/logs/" -name "*.log.*" -mtime +7 -delete 2>/dev/null || true
-        # Truncate bot.log to last 1000 lines if >10 MB
-        _botlog="$PROJECT_DIR/bot.log"
-        if [[ -f "$_botlog" ]]; then
-            _size=$(stat -c %s "$_botlog" 2>/dev/null || echo 0)
-            if (( _size > 10485760 )); then
-                tail -n 1000 "$_botlog" > "$_botlog.tmp" && mv "$_botlog.tmp" "$_botlog"
-                echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] Truncated bot.log (was ${_size} bytes)"
-            fi
-        fi
+        "$SCRIPT_DIR/log-cleanup.sh"
         touch "$CLEANUP_MARKER"
         echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] Log cleanup complete"
     fi

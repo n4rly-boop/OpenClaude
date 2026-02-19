@@ -17,7 +17,6 @@ import re
 import shutil
 import sys
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -78,11 +77,11 @@ TELEGRAM_MAX_LENGTH = 4096
 # Claude CLI timeout (seconds)
 CLAUDE_TIMEOUT = 300
 
-# Restart marker file — written by bin/restart.sh before a controlled restart
-RESTART_MARKER = SCRIPT_DIR / ".restart-marker"
+# Active stream tracking — file-backed so bash scripts can read it
+ACTIVE_STREAMS_FILE = SCRIPT_DIR / ".active-streams.json"
 
-# Maximum age (seconds) for a restart marker to be considered valid
-RESTART_MARKER_MAX_AGE = 120
+# Restart state — snapshot taken by restart.sh before killing the bot
+RESTART_STATE_FILE = SCRIPT_DIR / ".restart-state.json"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -206,6 +205,53 @@ def clear_session(chat_id: int, thread_id: int, user_id: int) -> None:
     if key in sessions:
         del sessions[key]
         save_sessions(sessions)
+
+
+# ---------------------------------------------------------------------------
+# Active Stream Tracking (file-backed for crash recovery)
+# ---------------------------------------------------------------------------
+
+
+def _save_active_streams(streams: dict) -> None:
+    """Atomic write of active streams to disk."""
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=ACTIVE_STREAMS_FILE.parent, suffix=".tmp"
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump(streams, f, indent=2)
+        os.replace(tmp_path, ACTIVE_STREAMS_FILE)
+    except OSError as e:
+        logger.error("Failed to save active streams: %s", e)
+
+
+def _load_active_streams() -> dict:
+    """Read active streams from disk."""
+    if ACTIVE_STREAMS_FILE.exists():
+        try:
+            return json.loads(ACTIVE_STREAMS_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _add_active_stream(chat_id: int, thread_id: int, user_id: int) -> None:
+    """Register a stream start. Survives crashes because it's on disk."""
+    streams = _load_active_streams()
+    key = _session_key(chat_id, thread_id, user_id)
+    streams[key] = {"chat_id": chat_id, "thread_id": thread_id, "user_id": user_id}
+    _save_active_streams(streams)
+
+
+def _remove_active_stream(chat_id: int, thread_id: int, user_id: int) -> None:
+    """Remove a completed stream. Deletes file when empty."""
+    streams = _load_active_streams()
+    key = _session_key(chat_id, thread_id, user_id)
+    streams.pop(key, None)
+    if streams:
+        _save_active_streams(streams)
+    else:
+        ACTIVE_STREAMS_FILE.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -561,8 +607,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
     ws_log = get_workspace_logger(chat_id)
     ws_log.info("Claude invocation — user=%d, session=%s", user_id, session_id or "new")
 
-    stream_key = _session_key(chat_id, thread_id, user_id)
-    _active_streams[stream_key] = (chat_id, thread_id, user_id)
+    _add_active_stream(chat_id, thread_id, user_id)
 
     try:
         is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
@@ -610,116 +655,111 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             session_id or "new",
         )
 
-        try:
-            env = os.environ.copy()
-            env.pop("CLAUDECODE", None)
-            env["IS_SANDBOX"] = "1"
-            local_bin = str(Path.home() / ".local" / "bin")
-            if local_bin not in env.get("PATH", ""):
-                env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        env["IS_SANDBOX"] = "1"
+        local_bin = str(Path.home() / ".local" / "bin")
+        if local_bin not in env.get("PATH", ""):
+            env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
-            )
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
+        )
 
-            result_text = None
-            new_session_id = None
-            deadline = asyncio.get_event_loop().time() + CLAUDE_TIMEOUT
+        result_text = None
+        new_session_id = None
+        deadline = asyncio.get_event_loop().time() + CLAUDE_TIMEOUT
 
-            while True:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    proc.kill()
-                    await proc.communicate()
-                    logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
-                    yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
-                    return
-
-                try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.communicate()
-                    logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
-                    yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
-                    return
-
-                if not line:
-                    break  # EOF
-
-                decoded = line.decode().strip()
-                if not decoded:
-                    continue
-
-                try:
-                    event = json.loads(decoded)
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON line from Claude: %s", decoded[:200])
-                    continue
-
-                event_type = event.get("type")
-
-                if event_type == "assistant":
-                    msg = event.get("message", {})
-                    content = msg.get("content", [])
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tool_name = block.get("name", "")
-                            tool_input = block.get("input", {})
-                            ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
-                            status = format_tool_status(tool_name, tool_input)
-                            yield {"type": "tool_use", "status": status}
-
-                elif event_type == "tool_result":
-                    yield {"type": "tool_result"}
-
-                elif event_type == "result":
-                    result_text = event.get("result", "")
-                    new_session_id = event.get("session_id")
-                    if new_session_id:
-                        set_session_id(chat_id, thread_id, user_id, new_session_id)
-                        logger.info("Session updated for user %d: %s", user_id, new_session_id)
-                    ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
-                    yield {"type": "result", "text": result_text, "session_id": new_session_id}
-
-            # Wait for process to finish
-            await proc.wait()
-
-            if proc.returncode != 0:
-                stderr_data = await proc.stderr.read()
-                error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
-                logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
-                ws_log.error("CLI error rc=%d: %s", proc.returncode, error_msg[:200])
-                if result_text is None:
-                    if _is_restarting():
-                        _mark_chat_for_restart(chat_id, thread_id, user_id)
-                        yield {"type": "result", "text": "Restarting \u2014 back in a moment..."}
-                    else:
-                        yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                proc.kill()
+                await proc.communicate()
+                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
                 return
 
-            # If we never got a result event
-            if result_text is None:
-                logger.warning("No result event received from stream")
-                yield {"type": "error", "text": "Claude returned no result."}
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+                return
 
-        except FileNotFoundError as e:
-            logger.exception("FileNotFoundError in stream_claude: %s", e)
-            yield {
-                "type": "error",
-                "text": "Error: Claude CLI not found. "
-                        "Make sure 'claude' is installed and available in PATH.",
-            }
-        except Exception as e:
-            logger.exception("Unexpected error streaming Claude")
-            yield {"type": "error", "text": f"Unexpected error: {e}"}
+            if not line:
+                break  # EOF
+
+            decoded = line.decode().strip()
+            if not decoded:
+                continue
+
+            try:
+                event = json.loads(decoded)
+            except json.JSONDecodeError:
+                logger.debug("Non-JSON line from Claude: %s", decoded[:200])
+                continue
+
+            event_type = event.get("type")
+
+            if event_type == "assistant":
+                msg = event.get("message", {})
+                content = msg.get("content", [])
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
+                        status = format_tool_status(tool_name, tool_input)
+                        yield {"type": "tool_use", "status": status}
+
+            elif event_type == "tool_result":
+                yield {"type": "tool_result"}
+
+            elif event_type == "result":
+                result_text = event.get("result", "")
+                new_session_id = event.get("session_id")
+                if new_session_id:
+                    set_session_id(chat_id, thread_id, user_id, new_session_id)
+                    logger.info("Session updated for user %d: %s", user_id, new_session_id)
+                ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
+                yield {"type": "result", "text": result_text, "session_id": new_session_id}
+
+        # Wait for process to finish
+        await proc.wait()
+
+        if proc.returncode != 0:
+            stderr_data = await proc.stderr.read()
+            error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
+            logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
+            ws_log.error("CLI error rc=%d: %s", proc.returncode, error_msg[:200])
+            if result_text is None:
+                yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
+            return
+
+        # If we never got a result event
+        if result_text is None:
+            logger.warning("No result event received from stream")
+            yield {"type": "error", "text": "Claude returned no result."}
+
+    except FileNotFoundError as e:
+        logger.exception("FileNotFoundError in stream_claude: %s", e)
+        yield {
+            "type": "error",
+            "text": "Error: Claude CLI not found. "
+                    "Make sure 'claude' is installed and available in PATH.",
+        }
+    except Exception as e:
+        logger.exception("Unexpected error streaming Claude")
+        yield {"type": "error", "text": f"Unexpected error: {e}"}
     finally:
-        _active_streams.pop(stream_key, None)
+        _remove_active_stream(chat_id, thread_id, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -743,36 +783,6 @@ renderer = TelegramRenderer()
 
 # Per-user locks to prevent concurrent Claude calls for the same user
 _user_locks: dict[int, asyncio.Lock] = {}
-
-# Track active Claude CLI streams: key -> (chat_id, thread_id, user_id)
-_active_streams: dict[str, tuple[int, int, int]] = {}
-
-def _is_restarting() -> bool:
-    """Check if the bot is in a controlled restart (recent .restart-marker exists)."""
-    if not RESTART_MARKER.exists():
-        return False
-    try:
-        data = json.loads(RESTART_MARKER.read_text())
-        return (time.time() - data.get("timestamp", 0)) < RESTART_MARKER_MAX_AGE
-    except (json.JSONDecodeError, OSError):
-        return False
-
-
-def _mark_chat_for_restart(chat_id: int, thread_id: int, user_id: int) -> None:
-    """Append this chat to the restart marker so post_init can resume it.
-
-    Called directly from stream_claude when it detects a restart-induced error,
-    before the generator's finally block clears _active_streams.
-    """
-    try:
-        data = json.loads(RESTART_MARKER.read_text())
-        chats = data.setdefault("active_chats", [])
-        chats.append({"chat_id": chat_id, "thread_id": thread_id, "user_id": user_id})
-        RESTART_MARKER.write_text(json.dumps(data))
-        infra_logger.info("Marked chat=%d thread=%d user=%d for restart continuation", chat_id, thread_id, user_id)
-    except (json.JSONDecodeError, OSError) as e:
-        infra_logger.error("Failed to mark chat for restart: %s", e)
-
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in _user_locks:
@@ -1165,14 +1175,10 @@ def main() -> None:
     logger.info("Session file: %s", SESSION_FILE)
     infra_logger.info("Bot starting — users=%s, workdir=%s", ALLOWED_USERS, WORKING_DIR)
 
-    async def post_stop(application: Application) -> None:
-        """Log shutdown."""
-        infra_logger.info("Bot shutting down")
-
     atexit.register(lambda: infra_logger.info("Bot process exiting"))
 
     async def post_init(application: Application) -> None:
-        """Fetch bot info at startup and continue interrupted generations."""
+        """Fetch bot info at startup and resume interrupted generations."""
         global BOT_USERNAME
         bot = application.bot
         me = await bot.get_me()
@@ -1180,30 +1186,31 @@ def main() -> None:
         logger.info("Bot username: @%s", BOT_USERNAME)
         infra_logger.info("Bot username: @%s", BOT_USERNAME)
 
-        # Continue interrupted generations from a controlled restart
-        if not RESTART_MARKER.exists():
-            return
-        try:
-            marker = json.loads(RESTART_MARKER.read_text())
-        except (json.JSONDecodeError, OSError):
-            RESTART_MARKER.unlink(missing_ok=True)
+        # Collect interrupted chats from two sources:
+        # 1. .restart-state.json — snapshot from restart.sh (controlled restart)
+        # 2. .active-streams.json — surviving entries from crash (finally blocks didn't run)
+        interrupted: dict[str, dict] = {}
+
+        for state_file in (RESTART_STATE_FILE, ACTIVE_STREAMS_FILE):
+            if not state_file.exists():
+                continue
+            try:
+                data = json.loads(state_file.read_text())
+                interrupted.update(data)
+            except (json.JSONDecodeError, OSError):
+                pass
+            finally:
+                state_file.unlink(missing_ok=True)
+
+        if not interrupted:
             return
 
-        if (time.time() - marker.get("timestamp", 0)) >= RESTART_MARKER_MAX_AGE:
-            RESTART_MARKER.unlink(missing_ok=True)
-            return
+        infra_logger.info("Resuming %d interrupted generation(s)", len(interrupted))
 
-        active_chats = marker.get("active_chats", [])
-        if not active_chats:
-            RESTART_MARKER.unlink(missing_ok=True)
-            return
-
-        infra_logger.info("Resuming %d interrupted generation(s)", len(active_chats))
-
-        async def _resume_chat(chat: dict) -> None:
-            cid = chat["chat_id"]
-            tid = chat["thread_id"]
-            uid = chat["user_id"]
+        async def _resume_chat(entry: dict) -> None:
+            cid = entry["chat_id"]
+            tid = entry["thread_id"]
+            uid = entry["user_id"]
             try:
                 session_id = get_session_id(cid, tid, uid)
                 if not session_id:
@@ -1219,13 +1226,12 @@ def main() -> None:
                 chat_working_dir = get_working_dir(cid)
                 result_text = None
                 async for event in stream_claude(resume_msg, cid, tid, uid,
-                                                  working_dir=chat_working_dir):
+                                                 working_dir=chat_working_dir):
                     if event.get("type") == "result":
                         result_text = event.get("text", "")
                     elif event.get("type") == "error":
                         result_text = event.get("text", "")
                 if result_text:
-                    # Split and send like send_rendered but without an Update object
                     md_chunks = split_message(result_text)
                     tg_thread_id = tid or None
                     for md_chunk in md_chunks:
@@ -1252,15 +1258,13 @@ def main() -> None:
                     "Failed to resume chat=%d thread=%d user=%d: %s", cid, tid, uid, e
                 )
 
-        await asyncio.gather(*[_resume_chat(c) for c in active_chats])
-        RESTART_MARKER.unlink(missing_ok=True)
+        await asyncio.gather(*[_resume_chat(e) for e in interrupted.values()])
         infra_logger.info("Restart recovery complete")
 
     app = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
-        .post_stop(post_stop)
         .build()
     )
 
