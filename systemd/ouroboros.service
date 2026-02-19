@@ -1,0 +1,19 @@
+[Unit]
+Description=Ouroboros — watchdog for OpenClaude Telegram Bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/OpenClaude
+ExecStart=/usr/bin/bash /path/to/OpenClaude/ouroboros.sh
+Restart=always
+RestartSec=10
+Environment=OUROBOROS_INTERVAL=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ouroboros
+
+[Install]
+WantedBy=default.target

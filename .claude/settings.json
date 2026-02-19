@@ -28,7 +28,7 @@
       "matcher": "Bash",
       "hooks": [{
         "type": "command",
-        "command": "bash -c 'CMD=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r .command 2>/dev/null); if echo \"$CMD\" | grep -qiE \"systemctl|service\\s+(stop|restart|start)|kill\\s|pkill\\s|killall\\s|claude-telegram-bot\"; then echo \"BLOCKED: You are not allowed to stop/restart the bot service. Use ./restart.sh instead.\" >&2; exit 2; fi'"
+        "command": "bash -c 'CMD=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r .command 2>/dev/null); if echo \"$CMD\" | grep -qiE \"systemctl|service\\s+(stop|restart|start)|kill\\s|pkill\\s|killall\\s|claude-telegram-bot|ouroboros\"; then echo \"BLOCKED: You are not allowed to stop/restart the bot or ouroboros service. Use ./restart.sh instead.\" >&2; exit 2; fi'"
       }]
     }]
   }
