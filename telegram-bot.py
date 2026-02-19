@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
 from datetime import datetime
@@ -41,7 +42,7 @@ load_dotenv(SCRIPT_DIR / ".env")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USERS_RAW = os.getenv("ALLOWED_USERS", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
-WORKING_DIR = os.getenv("WORKING_DIR", str(SCRIPT_DIR))
+WORKING_DIR = os.getenv("WORKING_DIR") or str(SCRIPT_DIR)
 
 # Uploads directory for voice, files, photos
 UPLOADS_DIR = SCRIPT_DIR / "uploads"
@@ -336,8 +337,10 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
         )
         message = preamble + message
 
+    claude_bin = shutil.which("claude") or "/root/.local/bin/claude"
+    logger.info("Using claude binary: %s (exists: %s)", claude_bin, os.path.isfile(claude_bin))
     cmd = [
-        "claude",
+        claude_bin,
         "-p", message,
         "--output-format", "json",
         "--allowedTools", ALLOWED_TOOLS,
@@ -356,11 +359,18 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
     )
 
     try:
+        env = os.environ.copy()
+        # Ensure claude CLI is findable even when launched from systemd/cron
+        local_bin = str(Path.home() / ".local" / "bin")
+        if local_bin not in env.get("PATH", ""):
+            env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=WORKING_DIR,
+            env=env,
         )
 
         try:
@@ -416,8 +426,8 @@ async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) 
 
         return result_text
 
-    except FileNotFoundError:
-        logger.error("Claude CLI not found. Is 'claude' installed and in PATH?")
+    except FileNotFoundError as e:
+        logger.exception("FileNotFoundError in call_claude: %s", e)
         return (
             "Error: Claude CLI not found. "
             "Make sure 'claude' is installed and available in PATH."
@@ -821,7 +831,7 @@ def main() -> None:
 
     # Start polling
     logger.info("Bot is running. Press Ctrl+C to stop.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

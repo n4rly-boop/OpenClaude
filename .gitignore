@@ -28,6 +28,10 @@ memory/*
 *.mp3
 *.mp4
 
+# Runtime
+.bot.pid
+bot.log
+
 # Heartbeat state
 heartbeat-state.json
 
