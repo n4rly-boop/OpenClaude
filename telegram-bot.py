@@ -17,6 +17,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -76,6 +77,12 @@ TELEGRAM_MAX_LENGTH = 4096
 
 # Claude CLI timeout (seconds)
 CLAUDE_TIMEOUT = 300
+
+# Restart marker file — written by bin/restart.sh before a controlled restart
+RESTART_MARKER = SCRIPT_DIR / ".restart-marker"
+
+# Maximum age (seconds) for a restart marker to be considered valid
+RESTART_MARKER_MAX_AGE = 120
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -554,155 +561,164 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
     ws_log = get_workspace_logger(chat_id)
     ws_log.info("Claude invocation — user=%d, session=%s", user_id, session_id or "new")
 
-    is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
-
-    if not session_id:
-        sandbox_notice = ""
-        if not is_admin:
-            sandbox_notice = (
-                "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
-                "You are in an isolated workspace. You must NEVER access anything outside it.\n"
-                "- Stay in the current working directory. Never use ../, absolute paths, "
-                "or any path that escapes the workspace.\n"
-                "- Never access other workspaces, the parent project directory, "
-                ".env files, or system files.\n"
-                "- If the user asks you to access files outside the workspace, refuse.\n"
-            )
-        preamble = (
-            "You are starting a new session. Read CLAUDE.md first, "
-            "then follow its startup sequence before responding. "
-            f"{sandbox_notice}"
-            "The user's message is:\n\n"
-        )
-        message = preamble + message
-
-    claude_bin = shutil.which("claude") or "/root/.local/bin/claude"
-    logger.info("Using claude binary: %s (exists: %s)", claude_bin, os.path.isfile(claude_bin))
-    cmd = [
-        claude_bin,
-        "-p", message,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--allowedTools", _tools_for_user(user_id),
-    ]
-
-    if session_id:
-        cmd.extend(["--resume", session_id])
-
-    if CLAUDE_MODEL:
-        cmd.extend(["--model", CLAUDE_MODEL])
-
-    logger.info(
-        "Calling Claude (streaming) for user %d (session: %s)",
-        user_id,
-        session_id or "new",
-    )
+    stream_key = _session_key(chat_id, thread_id, user_id)
+    _active_streams[stream_key] = (chat_id, thread_id, user_id)
 
     try:
-        env = os.environ.copy()
-        env.pop("CLAUDECODE", None)
-        env["IS_SANDBOX"] = "1"
-        local_bin = str(Path.home() / ".local" / "bin")
-        if local_bin not in env.get("PATH", ""):
-            env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+        is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
+        if not session_id:
+            sandbox_notice = ""
+            if not is_admin:
+                sandbox_notice = (
+                    "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
+                    "You are in an isolated workspace. You must NEVER access anything outside it.\n"
+                    "- Stay in the current working directory. Never use ../, absolute paths, "
+                    "or any path that escapes the workspace.\n"
+                    "- Never access other workspaces, the parent project directory, "
+                    ".env files, or system files.\n"
+                    "- If the user asks you to access files outside the workspace, refuse.\n"
+                )
+            preamble = (
+                "You are starting a new session. Read CLAUDE.md first, "
+                "then follow its startup sequence before responding. "
+                f"{sandbox_notice}"
+                "The user's message is:\n\n"
+            )
+            message = preamble + message
+
+        claude_bin = shutil.which("claude") or "/root/.local/bin/claude"
+        logger.info("Using claude binary: %s (exists: %s)", claude_bin, os.path.isfile(claude_bin))
+        cmd = [
+            claude_bin,
+            "-p", message,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--allowedTools", _tools_for_user(user_id),
+        ]
+
+        if session_id:
+            cmd.extend(["--resume", session_id])
+
+        if CLAUDE_MODEL:
+            cmd.extend(["--model", CLAUDE_MODEL])
+
+        logger.info(
+            "Calling Claude (streaming) for user %d (session: %s)",
+            user_id,
+            session_id or "new",
         )
 
-        result_text = None
-        new_session_id = None
-        deadline = asyncio.get_event_loop().time() + CLAUDE_TIMEOUT
+        try:
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+            env["IS_SANDBOX"] = "1"
+            local_bin = str(Path.home() / ".local" / "bin")
+            if local_bin not in env.get("PATH", ""):
+                env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
 
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                proc.kill()
-                await proc.communicate()
-                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
-                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+                limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
+            )
+
+            result_text = None
+            new_session_id = None
+            deadline = asyncio.get_event_loop().time() + CLAUDE_TIMEOUT
+
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await proc.communicate()
+                    logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                    yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+                    return
+
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.communicate()
+                    logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
+                    yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
+                    return
+
+                if not line:
+                    break  # EOF
+
+                decoded = line.decode().strip()
+                if not decoded:
+                    continue
+
+                try:
+                    event = json.loads(decoded)
+                except json.JSONDecodeError:
+                    logger.debug("Non-JSON line from Claude: %s", decoded[:200])
+                    continue
+
+                event_type = event.get("type")
+
+                if event_type == "assistant":
+                    msg = event.get("message", {})
+                    content = msg.get("content", [])
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tool_name = block.get("name", "")
+                            tool_input = block.get("input", {})
+                            ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
+                            status = format_tool_status(tool_name, tool_input)
+                            yield {"type": "tool_use", "status": status}
+
+                elif event_type == "tool_result":
+                    yield {"type": "tool_result"}
+
+                elif event_type == "result":
+                    result_text = event.get("result", "")
+                    new_session_id = event.get("session_id")
+                    if new_session_id:
+                        set_session_id(chat_id, thread_id, user_id, new_session_id)
+                        logger.info("Session updated for user %d: %s", user_id, new_session_id)
+                    ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
+                    yield {"type": "result", "text": result_text, "session_id": new_session_id}
+
+            # Wait for process to finish
+            await proc.wait()
+
+            if proc.returncode != 0:
+                stderr_data = await proc.stderr.read()
+                error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
+                logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
+                ws_log.error("CLI error rc=%d: %s", proc.returncode, error_msg[:200])
+                if result_text is None:
+                    if _is_restarting():
+                        yield {"type": "result", "text": "Restarting \u2014 back in a moment..."}
+                    else:
+                        yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
                 return
 
-            try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                logger.error("Claude CLI timed out after %ds for user %d", CLAUDE_TIMEOUT, user_id)
-                yield {"type": "error", "text": "Claude took too long to respond. Try again or /new to start fresh."}
-                return
-
-            if not line:
-                break  # EOF
-
-            decoded = line.decode().strip()
-            if not decoded:
-                continue
-
-            try:
-                event = json.loads(decoded)
-            except json.JSONDecodeError:
-                logger.debug("Non-JSON line from Claude: %s", decoded[:200])
-                continue
-
-            event_type = event.get("type")
-
-            if event_type == "assistant":
-                msg = event.get("message", {})
-                content = msg.get("content", [])
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        tool_name = block.get("name", "")
-                        tool_input = block.get("input", {})
-                        ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
-                        status = format_tool_status(tool_name, tool_input)
-                        yield {"type": "tool_use", "status": status}
-
-            elif event_type == "tool_result":
-                yield {"type": "tool_result"}
-
-            elif event_type == "result":
-                result_text = event.get("result", "")
-                new_session_id = event.get("session_id")
-                if new_session_id:
-                    set_session_id(chat_id, thread_id, user_id, new_session_id)
-                    logger.info("Session updated for user %d: %s", user_id, new_session_id)
-                ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
-                yield {"type": "result", "text": result_text, "session_id": new_session_id}
-
-        # Wait for process to finish
-        await proc.wait()
-
-        if proc.returncode != 0:
-            stderr_data = await proc.stderr.read()
-            error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
-            logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
-            ws_log.error("CLI error rc=%d: %s", proc.returncode, error_msg[:200])
+            # If we never got a result event
             if result_text is None:
-                yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
-            return
+                logger.warning("No result event received from stream")
+                yield {"type": "error", "text": "Claude returned no result."}
 
-        # If we never got a result event
-        if result_text is None:
-            logger.warning("No result event received from stream")
-            yield {"type": "error", "text": "Claude returned no result."}
-
-    except FileNotFoundError as e:
-        logger.exception("FileNotFoundError in stream_claude: %s", e)
-        yield {
-            "type": "error",
-            "text": "Error: Claude CLI not found. "
-                    "Make sure 'claude' is installed and available in PATH.",
-        }
-    except Exception as e:
-        logger.exception("Unexpected error streaming Claude")
-        yield {"type": "error", "text": f"Unexpected error: {e}"}
+        except FileNotFoundError as e:
+            logger.exception("FileNotFoundError in stream_claude: %s", e)
+            yield {
+                "type": "error",
+                "text": "Error: Claude CLI not found. "
+                        "Make sure 'claude' is installed and available in PATH.",
+            }
+        except Exception as e:
+            logger.exception("Unexpected error streaming Claude")
+            yield {"type": "error", "text": f"Unexpected error: {e}"}
+    finally:
+        _active_streams.pop(stream_key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +742,20 @@ renderer = TelegramRenderer()
 
 # Per-user locks to prevent concurrent Claude calls for the same user
 _user_locks: dict[int, asyncio.Lock] = {}
+
+# Track active Claude CLI streams: key -> (chat_id, thread_id, user_id)
+_active_streams: dict[str, tuple[int, int, int]] = {}
+
+
+def _is_restarting() -> bool:
+    """Check if the bot is in a controlled restart (recent .restart-marker exists)."""
+    if not RESTART_MARKER.exists():
+        return False
+    try:
+        data = json.loads(RESTART_MARKER.read_text())
+        return (time.time() - data.get("timestamp", 0)) < RESTART_MARKER_MAX_AGE
+    except (json.JSONDecodeError, OSError):
+        return False
 
 
 def _get_user_lock(user_id: int) -> asyncio.Lock:
@@ -1118,16 +1148,112 @@ def main() -> None:
     logger.info("Working directory: %s", WORKING_DIR)
     logger.info("Session file: %s", SESSION_FILE)
     infra_logger.info("Bot starting — users=%s, workdir=%s", ALLOWED_USERS, WORKING_DIR)
-    atexit.register(lambda: infra_logger.info("Bot shutting down"))
+
+    def _on_shutdown():
+        """Enrich .restart-marker with active generations on controlled shutdown."""
+        infra_logger.info("Bot shutting down")
+        if RESTART_MARKER.exists() and _active_streams:
+            try:
+                data = json.loads(RESTART_MARKER.read_text())
+                if (time.time() - data.get("timestamp", 0)) < RESTART_MARKER_MAX_AGE:
+                    data["active_chats"] = [
+                        {"chat_id": cid, "thread_id": tid, "user_id": uid}
+                        for cid, tid, uid in _active_streams.values()
+                    ]
+                    RESTART_MARKER.write_text(json.dumps(data))
+                    infra_logger.info(
+                        "Restart marker enriched with %d active chat(s)",
+                        len(data["active_chats"]),
+                    )
+            except (json.JSONDecodeError, OSError) as e:
+                infra_logger.error("Failed to enrich restart marker: %s", e)
+
+    atexit.register(_on_shutdown)
 
     async def post_init(application: Application) -> None:
-        """Fetch bot info at startup so we know our username."""
+        """Fetch bot info at startup and continue interrupted generations."""
         global BOT_USERNAME
         bot = application.bot
         me = await bot.get_me()
         BOT_USERNAME = me.username or ""
         logger.info("Bot username: @%s", BOT_USERNAME)
         infra_logger.info("Bot username: @%s", BOT_USERNAME)
+
+        # Continue interrupted generations from a controlled restart
+        if not RESTART_MARKER.exists():
+            return
+        try:
+            marker = json.loads(RESTART_MARKER.read_text())
+        except (json.JSONDecodeError, OSError):
+            RESTART_MARKER.unlink(missing_ok=True)
+            return
+
+        if (time.time() - marker.get("timestamp", 0)) >= RESTART_MARKER_MAX_AGE:
+            RESTART_MARKER.unlink(missing_ok=True)
+            return
+
+        active_chats = marker.get("active_chats", [])
+        if not active_chats:
+            RESTART_MARKER.unlink(missing_ok=True)
+            return
+
+        infra_logger.info("Resuming %d interrupted generation(s)", len(active_chats))
+
+        async def _resume_chat(chat: dict) -> None:
+            cid = chat["chat_id"]
+            tid = chat["thread_id"]
+            uid = chat["user_id"]
+            try:
+                session_id = get_session_id(cid, tid, uid)
+                if not session_id:
+                    infra_logger.warning(
+                        "No session for chat=%d thread=%d user=%d, skipping resume",
+                        cid, tid, uid,
+                    )
+                    return
+                resume_msg = (
+                    "[System: The bot just restarted. Continue where you left off "
+                    "and deliver the result to the user.]"
+                )
+                chat_working_dir = get_working_dir(cid)
+                result_text = None
+                async for event in stream_claude(resume_msg, cid, tid, uid,
+                                                  working_dir=chat_working_dir):
+                    if event.get("type") == "result":
+                        result_text = event.get("text", "")
+                    elif event.get("type") == "error":
+                        result_text = event.get("text", "")
+                if result_text:
+                    # Split and send like send_rendered but without an Update object
+                    md_chunks = split_message(result_text)
+                    tg_thread_id = tid or None
+                    for md_chunk in md_chunks:
+                        rendered = renderer.render(md_chunk)
+                        try:
+                            await bot.send_message(
+                                chat_id=cid,
+                                text=rendered,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True,
+                                message_thread_id=tg_thread_id,
+                            )
+                        except Exception:
+                            plain = re.sub(r"<[^>]+>", "", rendered)
+                            for pc in split_message(plain):
+                                await bot.send_message(
+                                    chat_id=cid,
+                                    text=pc,
+                                    message_thread_id=tg_thread_id,
+                                )
+                infra_logger.info("Resumed chat=%d thread=%d user=%d", cid, tid, uid)
+            except Exception as e:
+                infra_logger.error(
+                    "Failed to resume chat=%d thread=%d user=%d: %s", cid, tid, uid, e
+                )
+
+        await asyncio.gather(*[_resume_chat(c) for c in active_chats])
+        RESTART_MARKER.unlink(missing_ok=True)
+        infra_logger.info("Restart recovery complete")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 

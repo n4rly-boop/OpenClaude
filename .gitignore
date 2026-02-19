@@ -32,6 +32,7 @@ workspaces/
 # Runtime
 .bot.pid
 .ouroboros.pid
+.restart-marker
 bot.log
 logs/
 .last-log-cleanup
