@@ -1,9 +1,10 @@
 """
 Transcription module for OpenClaude — converts voice messages to text.
 
-Supports two backends:
+Supports three backends:
   - local: uses faster-whisper (runs in thread pool to avoid blocking)
   - groq: uses Groq's Whisper API (requires GROQ_API_KEY)
+  - deepgram: uses Deepgram Nova-3 Multilingual (requires DEEPGRAM_API_KEY)
 
 Backend is selected via the WHISPER_BACKEND environment variable (default: local).
 """
@@ -21,6 +22,8 @@ async def transcribe(audio_path: Path) -> str:
     backend = os.getenv("WHISPER_BACKEND", "local").lower().strip()
     if backend == "groq":
         return await transcribe_groq(audio_path)
+    if backend == "deepgram":
+        return await transcribe_deepgram(audio_path)
     return await transcribe_local(audio_path)
 
 
@@ -87,4 +90,43 @@ async def transcribe_groq(audio_path: Path) -> str:
         return text
     except Exception as e:
         logger.exception("Groq transcription failed")
+        return "[Transcription failed]"
+
+
+async def transcribe_deepgram(audio_path: Path) -> str:
+    """Transcribe using Deepgram Nova-3 Multilingual API (deepgram-sdk v5)."""
+    api_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
+    if not api_key:
+        logger.error("DEEPGRAM_API_KEY not set — cannot use Deepgram transcription backend")
+        return "[Transcription failed: DEEPGRAM_API_KEY not set]"
+
+    try:
+        from deepgram import DeepgramClient
+    except ImportError:
+        logger.error(
+            "deepgram-sdk is not installed. "
+            "Install it with: pip install deepgram-sdk"
+        )
+        return "[Transcription failed: deepgram-sdk not installed]"
+
+    try:
+        client = DeepgramClient(api_key=api_key)
+        audio_bytes = audio_path.read_bytes()
+
+        def _transcribe() -> str:
+            response = client.listen.v1.media.transcribe_file(
+                request=audio_bytes,
+                model="nova-3",
+                language="ru",
+                smart_format=True,
+            )
+            return response.results.channels[0].alternatives[0].transcript
+
+        text = await asyncio.to_thread(_transcribe)
+        text = text.strip() if text else ""
+        if not text:
+            return "[Transcription produced no text]"
+        return text
+    except Exception as e:
+        logger.exception("Deepgram transcription failed")
         return "[Transcription failed]"
