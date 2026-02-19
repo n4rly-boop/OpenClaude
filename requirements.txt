@@ -1,4 +1,3 @@
 python-telegram-bot>=21.0
 python-dotenv
-faster-whisper>=1.0.0
-groq>=0.4.0
+deepgram-sdk>=3.0.0

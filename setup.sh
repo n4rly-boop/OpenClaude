@@ -89,13 +89,7 @@ if [[ "${CONFIGURE_ENV:-0}" -eq 1 ]]; then
     echo "── Optional Configuration ──"
     echo ""
 
-    read -rp "Whisper backend for voice (local/groq) [local]: " WHISPER_BACKEND
-    WHISPER_BACKEND="${WHISPER_BACKEND:-local}"
-
-    GROQ_KEY=""
-    if [[ "$WHISPER_BACKEND" == "groq" ]]; then
-        read -rp "Groq API Key: " GROQ_KEY
-    fi
+    read -rp "Deepgram API Key (for voice transcription, leave blank to skip): " DEEPGRAM_KEY
 
     read -rp "Claude model override (leave blank for default): " CLAUDE_MODEL
 
@@ -113,8 +107,7 @@ replacements = {
     'TELEGRAM_BOT_TOKEN=': 'TELEGRAM_BOT_TOKEN=$BOT_TOKEN',
     'ALLOWED_USERS=': 'ALLOWED_USERS=$ALLOWED_USERS',
     'TELEGRAM_CHAT_ID=': 'TELEGRAM_CHAT_ID=$CHAT_ID',
-    'WHISPER_BACKEND=local': 'WHISPER_BACKEND=$WHISPER_BACKEND',
-    'GROQ_API_KEY=': 'GROQ_API_KEY=$GROQ_KEY',
+    'DEEPGRAM_API_KEY=': 'DEEPGRAM_API_KEY=$DEEPGRAM_KEY',
     'CLAUDE_MODEL=': 'CLAUDE_MODEL=$CLAUDE_MODEL',
     'WORKING_DIR=': 'WORKING_DIR=$PROJECT_DIR',
 }
@@ -254,7 +247,7 @@ echo ""
 echo "Next steps:"
 echo ""
 echo "  1. Review your .env file:        $ENV_FILE"
-echo "  2. Start the Telegram bot:       python3 $PROJECT_DIR/telegram-bot.py"
+echo "  2. Start the Telegram bot:       $PROJECT_DIR/start.sh"
 echo "  3. Message your bot on Telegram to verify it works"
 echo "  4. (Optional) Enable daemon/cron for background operation"
 echo "  5. (Optional) Customize BOOTSTRAP.md for new-chat identity setup"
