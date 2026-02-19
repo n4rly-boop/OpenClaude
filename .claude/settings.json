@@ -23,6 +23,13 @@
         "type": "command",
         "command": "bash -c 'echo \"=== LONG-TERM MEMORY ===\"; cat memory/MEMORY.md 2>/dev/null || echo \"(no long-term memory yet)\"; echo; echo \"=== TODAY MEMORY ===\"; cat memory/$(date +%Y-%m-%d).md 2>/dev/null || echo \"(no entries today yet)\"'"
       }]
+    }],
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "bash -c 'CMD=$(echo \"$CLAUDE_TOOL_INPUT\" | jq -r .command 2>/dev/null); if echo \"$CMD\" | grep -qiE \"systemctl|service\\s+(stop|restart|start)|kill\\s|pkill\\s|killall\\s|claude-telegram-bot\"; then echo \"BLOCKED: You are not allowed to stop/restart the bot service. Use ./restart.sh instead.\" >&2; exit 2; fi'"
+      }]
     }]
   }
 }
