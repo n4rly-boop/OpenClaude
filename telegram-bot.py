@@ -50,18 +50,13 @@ UPLOADS_DIR = SCRIPT_DIR / "uploads"
 # Workspaces directory for per-chat isolation
 WORKSPACES_DIR = SCRIPT_DIR / "workspaces"
 
-# Parse allowed users (preserving order — first entry is admin)
+# Parse allowed users
 ALLOWED_USERS: set[int] = set()
-ALLOWED_USERS_LIST: list[int] = []
 if ALLOWED_USERS_RAW.strip():
     for uid in ALLOWED_USERS_RAW.split(","):
         uid = uid.strip()
         if uid.isdigit():
             ALLOWED_USERS.add(int(uid))
-            ALLOWED_USERS_LIST.append(int(uid))
-
-# Admin is the first allowed user — their private chat uses the original WORKING_DIR
-ADMIN_USER_ID: int | None = ALLOWED_USERS_LIST[0] if ALLOWED_USERS_LIST else None
 
 # Session file
 SESSION_FILE = Path.home() / ".openclaude-sessions.json"
@@ -231,15 +226,11 @@ def _sync_workspace_links(workspace: Path) -> None:
             dst.symlink_to(os.path.relpath(src, workspace))
 
 
-def get_working_dir(chat_id: int, user_id: int) -> str:
+def get_working_dir(chat_id: int) -> str:
     """Return the working directory for a given chat.
 
-    Admin's private chat (chat_id == user_id == ADMIN_USER_ID) uses the
-    original WORKING_DIR so they can edit shared files directly.
-    All other chats get isolated workspaces.
+    Every chat gets an isolated workspace under workspaces/c{chat_id}/.
     """
-    if ADMIN_USER_ID and chat_id == user_id == ADMIN_USER_ID:
-        return WORKING_DIR
     return str(ensure_workspace(chat_id))
 
 
@@ -742,7 +733,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if updated := user_data.get("updated_at"):
         status_lines.append(f"<b>Last active:</b> {updated}")
 
-    chat_dir = get_working_dir(chat_id, user.id)
+    chat_dir = get_working_dir(chat_id)
     status_lines.extend([
         f"",
         f"<b>Working dir:</b> <code>{chat_dir}</code>",
@@ -796,7 +787,7 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
     response_text = None
-    chat_working_dir = get_working_dir(chat_id, user_id)
+    chat_working_dir = get_working_dir(chat_id)
 
     async with _get_user_lock(user_id):
         async for event in stream_claude(claude_message, chat_id, thread_id, user_id,
