@@ -20,13 +20,16 @@ uploads/*
 
 # Memory contents (keep directory)
 memory/*
-!memory/.gitkeep
+!memory/MEMORY.md
 
 # Media files
 *.ogg
 *.wav
 *.mp3
 *.mp4
+
+# Heartbeat state
+heartbeat-state.json
 
 # OS
 .DS_Store
