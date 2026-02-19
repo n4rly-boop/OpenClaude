@@ -32,6 +32,8 @@ workspaces/
 # Runtime
 .bot.pid
 bot.log
+logs/
+.last-log-cleanup
 
 # Heartbeat state
 heartbeat-state.json

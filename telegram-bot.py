@@ -6,10 +6,12 @@ Uses python-telegram-bot v21+ async API with Claude CLI as the backend.
 Sessions are persisted to ~/.openclaude-sessions.json for conversation continuity.
 """
 
+import atexit
 import asyncio
 import html
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -85,6 +87,61 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("OpenClaude")
+
+# ---------------------------------------------------------------------------
+# Structured File Logging
+# ---------------------------------------------------------------------------
+
+LOGS_DIR = SCRIPT_DIR / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+
+_LOG_FORMAT = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# Infra logger — startup, shutdown, crashes, ouroboros events
+infra_logger = logging.getLogger("OpenClaude.infra")
+infra_logger.propagate = False
+_infra_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "infra.log", maxBytes=5 * 1024 * 1024, backupCount=3
+)
+_infra_handler.setFormatter(_LOG_FORMAT)
+infra_logger.addHandler(_infra_handler)
+infra_logger.setLevel(logging.INFO)
+
+# Workspace logger factory — per-chat activity logs
+_workspace_loggers: dict[int, logging.Logger] = {}
+
+
+def get_workspace_logger(chat_id: int) -> logging.Logger:
+    """Return a cached logger that writes to workspaces/c{chat_id}/logs/activity.log."""
+    if chat_id in _workspace_loggers:
+        return _workspace_loggers[chat_id]
+    ws_log_dir = WORKSPACES_DIR / f"c{chat_id}" / "logs"
+    ws_log_dir.mkdir(parents=True, exist_ok=True)
+    ws_logger = logging.getLogger(f"OpenClaude.ws.{chat_id}")
+    ws_logger.propagate = False
+    handler = logging.handlers.RotatingFileHandler(
+        ws_log_dir / "activity.log", maxBytes=2 * 1024 * 1024, backupCount=2
+    )
+    handler.setFormatter(_LOG_FORMAT)
+    ws_logger.addHandler(handler)
+    ws_logger.setLevel(logging.INFO)
+    _workspace_loggers[chat_id] = ws_logger
+    return ws_logger
+
+
+def _summarize_input(tool_input: dict) -> str:
+    """Truncate a tool input dict to a readable one-liner for log entries."""
+    parts = []
+    for k, v in tool_input.items():
+        v_str = str(v)
+        if len(v_str) > 80:
+            v_str = v_str[:77] + "..."
+        parts.append(f"{k}={v_str}")
+    summary = ", ".join(parts)
+    return summary[:200] if len(summary) > 200 else summary
+
 
 # ---------------------------------------------------------------------------
 # Session Management
@@ -494,6 +551,8 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
     """
     cwd = working_dir or WORKING_DIR
     session_id = get_session_id(chat_id, thread_id, user_id)
+    ws_log = get_workspace_logger(chat_id)
+    ws_log.info("Claude invocation — user=%d, session=%s", user_id, session_id or "new")
 
     is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
 
@@ -599,10 +658,10 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 content = msg.get("content", [])
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_use":
-                        status = format_tool_status(
-                            block.get("name", ""),
-                            block.get("input", {}),
-                        )
+                        tool_name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
+                        status = format_tool_status(tool_name, tool_input)
                         yield {"type": "tool_use", "status": status}
 
             elif event_type == "tool_result":
@@ -614,6 +673,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 if new_session_id:
                     set_session_id(chat_id, thread_id, user_id, new_session_id)
                     logger.info("Session updated for user %d: %s", user_id, new_session_id)
+                ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
                 yield {"type": "result", "text": result_text, "session_id": new_session_id}
 
         # Wait for process to finish
@@ -623,6 +683,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             stderr_data = await proc.stderr.read()
             error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
             logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
+            ws_log.error("CLI error rc=%d: %s", proc.returncode, error_msg[:200])
             if result_text is None:
                 yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
             return
@@ -884,6 +945,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         thread_id,
         len(message_text),
     )
+    get_workspace_logger(chat_id).info(
+        "Message from user %d (%s), length=%d",
+        user.id, user.username or user.first_name, len(message_text),
+    )
 
     await _run_with_streaming(update, context, chat_id, thread_id, user.id, message_text)
 
@@ -911,6 +976,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         chat_id,
         thread_id,
         getattr(voice, "duration", "?"),
+    )
+    get_workspace_logger(chat_id).info(
+        "Voice from user %d (%s), duration=%s",
+        user.id, user.username or user.first_name, getattr(voice, "duration", "?"),
     )
 
     voice_dir = UPLOADS_DIR / "voice"
@@ -953,6 +1022,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         thread_id,
         doc.file_name,
         doc.file_size,
+    )
+    get_workspace_logger(chat_id).info(
+        "Document from user %d: %s (%s bytes)",
+        user.id, doc.file_name, doc.file_size,
     )
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1001,6 +1074,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         photo.width,
         photo.height,
     )
+    get_workspace_logger(chat_id).info(
+        "Photo from user %d, size=%dx%d",
+        user.id, photo.width, photo.height,
+    )
 
     today = datetime.now().strftime("%Y-%m-%d")
     dest_dir = UPLOADS_DIR / today
@@ -1034,11 +1111,14 @@ def main() -> None:
             "ALLOWED_USERS is empty. No one will be able to use the bot. "
             "Set ALLOWED_USERS in .env with your Telegram user ID."
         )
+        infra_logger.warning("ALLOWED_USERS is empty — no one is authorized")
 
     logger.info("Starting OpenClaude Telegram bot...")
     logger.info("Allowed users: %s", ALLOWED_USERS)
     logger.info("Working directory: %s", WORKING_DIR)
     logger.info("Session file: %s", SESSION_FILE)
+    infra_logger.info("Bot starting — users=%s, workdir=%s", ALLOWED_USERS, WORKING_DIR)
+    atexit.register(lambda: infra_logger.info("Bot shutting down"))
 
     async def post_init(application: Application) -> None:
         """Fetch bot info at startup so we know our username."""
@@ -1047,6 +1127,7 @@ def main() -> None:
         me = await bot.get_me()
         BOT_USERNAME = me.username or ""
         logger.info("Bot username: @%s", BOT_USERNAME)
+        infra_logger.info("Bot username: @%s", BOT_USERNAME)
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
@@ -1061,6 +1142,7 @@ def main() -> None:
 
     # Start polling
     logger.info("Bot is running. Press Ctrl+C to stop.")
+    infra_logger.info("Bot running")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
