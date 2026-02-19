@@ -554,6 +554,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
         )
 
         result_text = None
@@ -678,11 +679,12 @@ async def send_rendered(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Render markdown to HTML and send, splitting if needed."""
-    rendered = renderer.render(text)
-    chunks = split_message(rendered)
+    # Split markdown first, then render each chunk — avoids breaking HTML tags
+    md_chunks = split_message(text)
     thread_id = get_thread_id(update)
 
-    for chunk in chunks:
+    for md_chunk in md_chunks:
+        chunk = renderer.render(md_chunk)
         try:
             await update.message.reply_text(
                 chunk,
@@ -691,12 +693,14 @@ async def send_rendered(
                 message_thread_id=thread_id or None,
             )
         except Exception:
-            logger.warning("HTML parse failed for chunk, falling back to plain text")
+            logger.warning("HTML send failed for chunk, falling back to plain text")
             plain = re.sub(r"<[^>]+>", "", chunk)
-            await update.message.reply_text(
-                plain,
-                message_thread_id=thread_id or None,
-            )
+            plain_chunks = split_message(plain)
+            for pc in plain_chunks:
+                await update.message.reply_text(
+                    pc,
+                    message_thread_id=thread_id or None,
+                )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
