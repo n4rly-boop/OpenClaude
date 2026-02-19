@@ -718,7 +718,8 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             logger.exception("Unexpected error streaming Claude")
             yield {"type": "error", "text": f"Unexpected error: {e}"}
     finally:
-        _active_streams.pop(stream_key, None)
+        if not _shutting_down:
+            _active_streams.pop(stream_key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +746,9 @@ _user_locks: dict[int, asyncio.Lock] = {}
 
 # Track active Claude CLI streams: key -> (chat_id, thread_id, user_id)
 _active_streams: dict[str, tuple[int, int, int]] = {}
+
+# Set to True during shutdown so stream_claude finally blocks don't clear _active_streams
+_shutting_down: bool = False
 
 
 def _is_restarting() -> bool:
@@ -1149,9 +1153,8 @@ def main() -> None:
     logger.info("Session file: %s", SESSION_FILE)
     infra_logger.info("Bot starting — users=%s, workdir=%s", ALLOWED_USERS, WORKING_DIR)
 
-    def _on_shutdown():
-        """Enrich .restart-marker with active generations on controlled shutdown."""
-        infra_logger.info("Bot shutting down")
+    def _enrich_restart_marker():
+        """Write active generation info into .restart-marker if it exists."""
         if RESTART_MARKER.exists() and _active_streams:
             try:
                 data = json.loads(RESTART_MARKER.read_text())
@@ -1168,7 +1171,19 @@ def main() -> None:
             except (json.JSONDecodeError, OSError) as e:
                 infra_logger.error("Failed to enrich restart marker: %s", e)
 
-    atexit.register(_on_shutdown)
+    async def post_stop(application: Application) -> None:
+        """Enrich restart marker while the event loop is still alive.
+
+        This runs BEFORE async generators are cleaned up, so _active_streams
+        is still populated. We also set _shutting_down to prevent the finally
+        blocks in stream_claude from clearing _active_streams.
+        """
+        global _shutting_down
+        _shutting_down = True
+        _enrich_restart_marker()
+        infra_logger.info("Bot shutting down")
+
+    atexit.register(lambda: infra_logger.info("Bot process exiting"))
 
     async def post_init(application: Application) -> None:
         """Fetch bot info at startup and continue interrupted generations."""
@@ -1255,7 +1270,13 @@ def main() -> None:
         RESTART_MARKER.unlink(missing_ok=True)
         infra_logger.info("Restart recovery complete")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_stop(post_stop)
+        .build()
+    )
 
     # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
