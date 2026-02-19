@@ -28,6 +28,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from transcribe import transcribe
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -40,6 +42,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USERS_RAW = os.getenv("ALLOWED_USERS", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
 WORKING_DIR = os.getenv("WORKING_DIR", str(SCRIPT_DIR))
+
+# Uploads directory for voice, files, photos
+UPLOADS_DIR = SCRIPT_DIR / "uploads"
 
 # Parse allowed users
 ALLOWED_USERS: set[int] = set()
@@ -523,6 +528,143 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         raise
 
 
+async def _run_with_typing(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           user_id: int, claude_message: str) -> None:
+    """Shared helper: show typing indicator, call Claude under per-user lock, send response."""
+    stop_typing = asyncio.Event()
+
+    async def keep_typing():
+        while not stop_typing.is_set():
+            try:
+                await update.message.chat.send_action(ChatAction.TYPING)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
+            except asyncio.TimeoutError:
+                pass
+
+    typing_task = asyncio.create_task(keep_typing())
+
+    try:
+        async with _get_user_lock(user_id):
+            response = await call_claude(claude_message, user_id)
+
+        stop_typing.set()
+        await typing_task
+        await send_rendered(update, response, context)
+    except Exception:
+        stop_typing.set()
+        await typing_task
+        raise
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming voice messages and audio — transcribe and route to Claude."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    logger.info(
+        "Voice/audio from %s (%d), duration=%s",
+        user.username or user.first_name,
+        user.id,
+        getattr(voice, "duration", "?"),
+    )
+
+    voice_dir = UPLOADS_DIR / "voice"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    ogg_path = voice_dir / f"{voice.file_id}.ogg"
+
+    file = await context.bot.get_file(voice.file_id)
+    await file.download_to_drive(ogg_path)
+
+    text = await transcribe(ogg_path)
+    caption = update.message.caption or ""
+    claude_msg = f'[Voice message transcription]: "{text}"'
+    if caption:
+        claude_msg += f' User also wrote: "{caption}"'
+
+    await _run_with_typing(update, context, user.id, claude_msg)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming documents/files — download and tell Claude the path."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    doc = update.message.document
+    if not doc:
+        return
+
+    logger.info(
+        "Document from %s (%d): %s (%s bytes)",
+        user.username or user.first_name,
+        user.id,
+        doc.file_name,
+        doc.file_size,
+    )
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    dest_dir = UPLOADS_DIR / today
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # Sanitize filename: strip path components to prevent path traversal
+    safe_name = Path(doc.file_name).name if doc.file_name else f"file_{doc.file_id}"
+    dest = dest_dir / safe_name
+
+    file = await context.bot.get_file(doc.file_id)
+    await file.download_to_drive(dest)
+
+    caption = update.message.caption or ""
+    claude_msg = f"[File received: {dest.relative_to(SCRIPT_DIR)}]"
+    if caption:
+        claude_msg += f' User says: "{caption}"'
+
+    await _run_with_typing(update, context, user.id, claude_msg)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming photos — download largest size and tell Claude the path."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    photos = update.message.photo
+    if not photos:
+        return
+
+    # Telegram sends multiple sizes; last is the largest
+    photo = photos[-1]
+
+    logger.info(
+        "Photo from %s (%d), size=%dx%d",
+        user.username or user.first_name,
+        user.id,
+        photo.width,
+        photo.height,
+    )
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    dest_dir = UPLOADS_DIR / today
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"photo_{photo.file_unique_id}.jpg"
+
+    file = await context.bot.get_file(photo.file_id)
+    await file.download_to_drive(dest)
+
+    caption = update.message.caption or ""
+    claude_msg = f"[Photo received: {dest.relative_to(SCRIPT_DIR)}]"
+    if caption:
+        claude_msg += f' User says: "{caption}"'
+
+    await _run_with_typing(update, context, user.id, claude_msg)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -552,6 +694,9 @@ def main() -> None:
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     # Start polling
     logger.info("Bot is running. Press Ctrl+C to stop.")

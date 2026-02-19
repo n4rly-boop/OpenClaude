@@ -136,10 +136,30 @@ launchctl load ~/Library/LaunchAgents/com.claude.telegram-bot.plist
 - **Session continuity** -- conversations persist across messages using Claude's `--resume` flag
 - **Full tool access** -- Claude can read/write files, search the web, run shell commands, and more
 - **Memory system** -- long-term memory (`memory/MEMORY.md`) and daily journals (`memory/YYYY-MM-DD.md`)
+- **Voice messages** -- send voice notes or audio files; they are transcribed and routed to Claude
+- **File and photo handling** -- send documents or photos; Claude receives the file path and can read/analyze them
 - **Telegram HTML rendering** -- markdown responses are converted to Telegram-compatible HTML
 - **Message splitting** -- long responses are automatically split at paragraph/sentence boundaries
 - **User authorization** -- only allowed Telegram user IDs can interact with the bot
 - **Telegram sender skill** -- Claude can proactively send messages and files via Telegram
+
+### Voice Messages
+
+Send a voice message or audio file on Telegram and the bot will transcribe it, then pass the text to Claude. Two transcription backends are supported:
+
+- **local** (default) -- uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) to transcribe on your machine. No API key needed, but requires the `faster-whisper` Python package and enough CPU/RAM for the model. Set the model size with `WHISPER_MODEL` (default: `base`).
+- **groq** -- uses [Groq's Whisper API](https://console.groq.com/) for fast cloud transcription. Requires a `GROQ_API_KEY` in your `.env`.
+
+Set the backend via the `WHISPER_BACKEND` environment variable in `.env`:
+```env
+WHISPER_BACKEND=local   # or "groq"
+WHISPER_MODEL=base      # for local backend: tiny, base, small, medium, large-v3
+GROQ_API_KEY=gsk_...    # required for groq backend
+```
+
+### File and Photo Handling
+
+Send a document or photo on Telegram and the bot will download it to `uploads/YYYY-MM-DD/` and tell Claude the file path. Claude can then read, analyze, or process the file using its tools. Add a caption to your file to give Claude context about what you want done with it.
 
 ## Security
 
