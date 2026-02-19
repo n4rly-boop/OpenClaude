@@ -105,26 +105,87 @@ def save_sessions(sessions: dict) -> None:
         logger.error("Failed to save sessions: %s", e)
 
 
-def get_session_id(user_id: int) -> str | None:
-    """Get the Claude session ID for a Telegram user."""
-    sessions = load_sessions()
-    return sessions.get(str(user_id), {}).get("session_id")
+def _session_key(chat_id: int, thread_id: int, user_id: int) -> str:
+    """Build a composite session key: chat_id:thread_id:user_id."""
+    return f"{chat_id}:{thread_id}:{user_id}"
 
 
-def set_session_id(user_id: int, session_id: str) -> None:
-    """Store a Claude session ID for a Telegram user."""
+def get_session_id(chat_id: int, thread_id: int, user_id: int) -> str | None:
+    """Get the Claude session ID for a given chat/thread/user combination."""
     sessions = load_sessions()
-    sessions.setdefault(str(user_id), {})["session_id"] = session_id
-    sessions[str(user_id)]["updated_at"] = datetime.now().isoformat()
+    key = _session_key(chat_id, thread_id, user_id)
+    return sessions.get(key, {}).get("session_id")
+
+
+def set_session_id(chat_id: int, thread_id: int, user_id: int, session_id: str) -> None:
+    """Store a Claude session ID for a given chat/thread/user combination."""
+    sessions = load_sessions()
+    key = _session_key(chat_id, thread_id, user_id)
+    sessions.setdefault(key, {})["session_id"] = session_id
+    sessions[key]["updated_at"] = datetime.now().isoformat()
     save_sessions(sessions)
 
 
-def clear_session(user_id: int) -> None:
-    """Clear the session for a user, starting fresh."""
+def clear_session(chat_id: int, thread_id: int, user_id: int) -> None:
+    """Clear the session for a chat/thread/user combination, starting fresh."""
     sessions = load_sessions()
-    if str(user_id) in sessions:
-        del sessions[str(user_id)]
+    key = _session_key(chat_id, thread_id, user_id)
+    if key in sessions:
+        del sessions[key]
         save_sessions(sessions)
+
+
+# ---------------------------------------------------------------------------
+# Group / Topic Helpers
+# ---------------------------------------------------------------------------
+
+# Populated at startup via post_init callback
+BOT_USERNAME: str = ""
+
+
+def should_respond(update: Update) -> bool:
+    """Decide whether the bot should respond to this message.
+
+    Always responds in private chats.  In groups, only responds when the bot
+    is @mentioned or the message is a reply to one of the bot's messages.
+    """
+    chat = update.effective_chat
+    if chat.type == "private":
+        return True
+
+    msg = update.message
+    if not msg:
+        return False
+
+    # Respond if bot is @mentioned
+    if msg.entities:
+        for entity in msg.entities:
+            if entity.type == "mention":
+                mention = msg.text[entity.offset:entity.offset + entity.length]
+                if mention.lower() == f"@{BOT_USERNAME.lower()}":
+                    return True
+
+    # Respond if message is a reply to the bot's own message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        if msg.reply_to_message.from_user.username and \
+           msg.reply_to_message.from_user.username.lower() == BOT_USERNAME.lower():
+            return True
+
+    return False
+
+
+def get_thread_id(update: Update) -> int:
+    """Get the forum topic thread ID, or 0 for non-forum messages."""
+    msg = update.message
+    return msg.message_thread_id if msg and msg.message_thread_id else 0
+
+
+def strip_bot_mention(text: str) -> str:
+    """Remove @bot_username from message text."""
+    if BOT_USERNAME:
+        # Case-insensitive removal of the mention
+        text = re.sub(rf"@{re.escape(BOT_USERNAME)}\b", "", text, flags=re.IGNORECASE).strip()
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -262,9 +323,9 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
 # ---------------------------------------------------------------------------
 
 
-async def call_claude(message: str, user_id: int) -> str:
+async def call_claude(message: str, chat_id: int, thread_id: int, user_id: int) -> str:
     """Call the Claude CLI with a message and return the response text."""
-    session_id = get_session_id(user_id)
+    session_id = get_session_id(chat_id, thread_id, user_id)
 
     # On first message in a session, prepend instructions to read prompt files
     if not session_id:
@@ -332,7 +393,7 @@ async def call_claude(message: str, user_id: int) -> str:
         # Extract session ID for continuity
         new_session_id = data.get("session_id")
         if new_session_id:
-            set_session_id(user_id, new_session_id)
+            set_session_id(chat_id, thread_id, user_id, new_session_id)
             logger.info("Session updated for user %d: %s", user_id, new_session_id)
 
         # Extract the response text
@@ -403,6 +464,7 @@ async def send_rendered(
     """Render markdown to HTML and send, splitting if needed."""
     rendered = renderer.render(text)
     chunks = split_message(rendered)
+    thread_id = get_thread_id(update)
 
     for chunk in chunks:
         try:
@@ -410,11 +472,15 @@ async def send_rendered(
                 chunk,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
+                message_thread_id=thread_id or None,
             )
         except Exception:
             logger.warning("HTML parse failed for chunk, falling back to plain text")
             plain = re.sub(r"<[^>]+>", "", chunk)
-            await update.message.reply_text(plain)
+            await update.message.reply_text(
+                plain,
+                message_thread_id=thread_id or None,
+            )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -442,9 +508,14 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(user.id):
         return
 
-    clear_session(user.id)
-    await update.message.reply_text("Session cleared. Starting fresh.")
-    logger.info("Session cleared for user %d", user.id)
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+    clear_session(chat_id, thread_id, user.id)
+    await update.message.reply_text(
+        "Session cleared. Starting fresh.",
+        message_thread_id=thread_id or None,
+    )
+    logger.info("Session cleared for user %d in chat %d thread %d", user.id, chat_id, thread_id)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -454,9 +525,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Your Telegram user ID: {user.id}")
         return
 
-    session_id = get_session_id(user.id)
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+    session_id = get_session_id(chat_id, thread_id, user.id)
     sessions = load_sessions()
-    user_data = sessions.get(str(user.id), {})
+    key = _session_key(chat_id, thread_id, user.id)
+    user_data = sessions.get(key, {})
 
     status_lines = [
         f"<b>OpenClaude Status</b>",
@@ -478,6 +552,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(
         "\n".join(status_lines),
         parse_mode=ParseMode.HTML,
+        message_thread_id=thread_id or None,
     )
 
 
@@ -487,14 +562,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_authorized(user.id):
         return
 
+    if not should_respond(update):
+        return
+
     message_text = update.message.text
     if not message_text:
         return
 
+    # Strip @bot_username from the text before sending to Claude
+    message_text = strip_bot_mention(message_text)
+    if not message_text:
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+
     logger.info(
-        "Message from %s (%d), length=%d",
+        "Message from %s (%d) in chat %d thread %d, length=%d",
         user.username or user.first_name,
         user.id,
+        chat_id,
+        thread_id,
         len(message_text),
     )
 
@@ -517,7 +605,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         # Per-user lock prevents concurrent Claude calls for the same user
         async with _get_user_lock(user.id):
-            response = await call_claude(message_text, user.id)
+            response = await call_claude(message_text, chat_id, thread_id, user.id)
 
         stop_typing.set()
         await typing_task
@@ -529,7 +617,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _run_with_typing(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                           user_id: int, claude_message: str) -> None:
+                           chat_id: int, thread_id: int, user_id: int,
+                           claude_message: str) -> None:
     """Shared helper: show typing indicator, call Claude under per-user lock, send response."""
     stop_typing = asyncio.Event()
 
@@ -548,7 +637,7 @@ async def _run_with_typing(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     try:
         async with _get_user_lock(user_id):
-            response = await call_claude(claude_message, user_id)
+            response = await call_claude(claude_message, chat_id, thread_id, user_id)
 
         stop_typing.set()
         await typing_task
@@ -565,14 +654,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not is_authorized(user.id):
         return
 
+    if not should_respond(update):
+        return
+
     voice = update.message.voice or update.message.audio
     if not voice:
         return
 
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+
     logger.info(
-        "Voice/audio from %s (%d), duration=%s",
+        "Voice/audio from %s (%d) in chat %d thread %d, duration=%s",
         user.username or user.first_name,
         user.id,
+        chat_id,
+        thread_id,
         getattr(voice, "duration", "?"),
     )
 
@@ -589,7 +686,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User also wrote: "{caption}"'
 
-    await _run_with_typing(update, context, user.id, claude_msg)
+    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -598,14 +695,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not is_authorized(user.id):
         return
 
+    if not should_respond(update):
+        return
+
     doc = update.message.document
     if not doc:
         return
 
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+
     logger.info(
-        "Document from %s (%d): %s (%s bytes)",
+        "Document from %s (%d) in chat %d thread %d: %s (%s bytes)",
         user.username or user.first_name,
         user.id,
+        chat_id,
+        thread_id,
         doc.file_name,
         doc.file_size,
     )
@@ -625,13 +730,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_typing(update, context, user.id, claude_msg)
+    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming photos — download largest size and tell Claude the path."""
     user = update.effective_user
     if not is_authorized(user.id):
+        return
+
+    if not should_respond(update):
         return
 
     photos = update.message.photo
@@ -641,10 +749,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Telegram sends multiple sizes; last is the largest
     photo = photos[-1]
 
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+
     logger.info(
-        "Photo from %s (%d), size=%dx%d",
+        "Photo from %s (%d) in chat %d thread %d, size=%dx%d",
         user.username or user.first_name,
         user.id,
+        chat_id,
+        thread_id,
         photo.width,
         photo.height,
     )
@@ -662,7 +775,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_typing(update, context, user.id, claude_msg)
+    await _run_with_typing(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +800,15 @@ def main() -> None:
     logger.info("Working directory: %s", WORKING_DIR)
     logger.info("Session file: %s", SESSION_FILE)
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    async def post_init(application: Application) -> None:
+        """Fetch bot info at startup so we know our username."""
+        global BOT_USERNAME
+        bot = application.bot
+        me = await bot.get_me()
+        BOT_USERNAME = me.username or ""
+        logger.info("Bot username: @%s", BOT_USERNAME)
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
