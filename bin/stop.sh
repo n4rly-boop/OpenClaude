@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="claude-telegram-bot"
-PIDFILE="$SCRIPT_DIR/.bot.pid"
+PIDFILE="$PROJECT_DIR/.bot.pid"
 
 if command -v systemctl &>/dev/null && systemctl --user is-active "$SERVICE_NAME" &>/dev/null 2>&1; then
     systemctl --user stop "$SERVICE_NAME"

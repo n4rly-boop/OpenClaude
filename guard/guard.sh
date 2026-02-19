@@ -16,7 +16,7 @@ FILEPATH=$(echo "$CLAUDE_TOOL_INPUT" | jq -r '.file_path // empty' 2>/dev/null)
 
 # 1. Service management (bot, ouroboros, or any service stop/restart)
 if echo "$CMD" | grep -qiE "systemctl|service\s+(stop|restart|start)|kill\s|pkill\s|killall\s|claude-telegram-bot|ouroboros"; then
-    echo "BLOCKED: You are not allowed to manage system services. Use ./restart.sh for the bot." >&2
+    echo "BLOCKED: You are not allowed to manage system services. Use ./bin/restart.sh for the bot." >&2
     exit 2
 fi
 

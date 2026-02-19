@@ -2,10 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SERVICE_NAME="claude-telegram-bot"
-SERVICE_FILE="$SCRIPT_DIR/systemd/$SERVICE_NAME.service"
+SERVICE_FILE="$PROJECT_DIR/services/systemd/$SERVICE_NAME.service"
 SYSTEMD_DEST="$HOME/.config/systemd/user"
-LOGFILE="$SCRIPT_DIR/bot.log"
+LOGFILE="$PROJECT_DIR/bot.log"
 
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -16,7 +17,7 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-if [ ! -f "$SCRIPT_DIR/.env" ]; then
+if [ ! -f "$PROJECT_DIR/.env" ]; then
     echo "Error: .env not found. Run setup.sh first."
     exit 1
 fi
@@ -38,7 +39,7 @@ if [[ "$USE_SYSTEMD" -eq 1 ]]; then
     # Install/update service file with real paths
     mkdir -p "$SYSTEMD_DEST"
     CURRENT_USER="$(whoami)"
-    sed -e "s|/path/to/OpenClaude|$SCRIPT_DIR|g" \
+    sed -e "s|/path/to/OpenClaude|$PROJECT_DIR|g" \
         -e "s|your-username-here|$CURRENT_USER|g" \
         "$SERVICE_FILE" > "$SYSTEMD_DEST/$SERVICE_NAME.service"
 
@@ -53,7 +54,7 @@ if [[ "$USE_SYSTEMD" -eq 1 ]]; then
     echo "Stop: ./stop.sh"
 else
     # Fallback: nohup
-    PIDFILE="$SCRIPT_DIR/.bot.pid"
+    PIDFILE="$PROJECT_DIR/.bot.pid"
 
     if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE")
@@ -68,7 +69,7 @@ else
     pkill -f "python3.*telegram-bot.py" 2>/dev/null || true
     sleep 1
 
-    cd "$SCRIPT_DIR"
+    cd "$PROJECT_DIR"
     nohup python3 -u telegram-bot.py >> "$LOGFILE" 2>&1 &
     BOT_PID=$!
     echo "$BOT_PID" > "$PIDFILE"

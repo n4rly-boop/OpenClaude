@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "========================================"
 echo "  OpenClaude Setup"
@@ -155,7 +155,7 @@ if [[ "$OS" == "Darwin" ]]; then
     read -rp "Set up launchd daemons for Telegram bot and scheduled skills? [y/N] " SETUP_LAUNCHD
 
     if [[ "$SETUP_LAUNCHD" == "y" || "$SETUP_LAUNCHD" == "Y" ]]; then
-        LAUNCHD_DIR="$PROJECT_DIR/launchd"
+        LAUNCHD_DIR="$PROJECT_DIR/services/launchd"
         PLIST_DEST="$HOME/Library/LaunchAgents"
         mkdir -p "$PLIST_DEST"
 
@@ -186,7 +186,7 @@ elif [[ "$OS" == "Linux" ]]; then
     read -rp "Set up systemd services for the Telegram bot? [y/N] " SETUP_SYSTEMD
 
     if [[ "$SETUP_SYSTEMD" == "y" || "$SETUP_SYSTEMD" == "Y" ]]; then
-        SYSTEMD_DIR="$PROJECT_DIR/systemd"
+        SYSTEMD_DIR="$PROJECT_DIR/services/systemd"
         SYSTEMD_DEST="$HOME/.config/systemd/user"
         mkdir -p "$SYSTEMD_DEST"
 
@@ -247,7 +247,7 @@ echo ""
 echo "Next steps:"
 echo ""
 echo "  1. Review your .env file:        $ENV_FILE"
-echo "  2. Start the Telegram bot:       $PROJECT_DIR/start.sh"
+echo "  2. Start the Telegram bot:       $PROJECT_DIR/bin/start.sh"
 echo "  3. Message your bot on Telegram to verify it works"
 echo "  4. (Optional) Enable daemon/cron for background operation"
 echo "  5. (Optional) Customize BOOTSTRAP.md for new-chat identity setup"

@@ -29,21 +29,21 @@
         "matcher": "Bash",
         "hooks": [{
           "type": "command",
-          "command": "bash /root/OpenClaude/guard.sh"
+          "command": "bash /root/OpenClaude/guard/guard.sh"
         }]
       },
       {
         "matcher": "Write",
         "hooks": [{
           "type": "command",
-          "command": "bash /root/OpenClaude/guard-write.sh"
+          "command": "bash /root/OpenClaude/guard/guard-write.sh"
         }]
       },
       {
         "matcher": "Edit",
         "hooks": [{
           "type": "command",
-          "command": "bash /root/OpenClaude/guard-write.sh"
+          "command": "bash /root/OpenClaude/guard/guard-write.sh"
         }]
       }
     ]

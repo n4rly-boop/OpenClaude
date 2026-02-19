@@ -105,7 +105,7 @@ When doing proactive work, be brief and useful. Don't send messages just to show
 - Pretend to be the human
 - Make up information and present it as fact
 - **NEVER run `systemctl`, `service`, `kill`, `pkill`, `killall`, or any command that stops/restarts the bot process or its systemd service.** You must not stop, restart, or interfere with the `claude-telegram-bot` or `ouroboros` service in any way.
-- If you need to restart the bot, the ONLY allowed method is running `./restart.sh` from the project directory. No other restart/stop method is permitted.
+- If you need to restart the bot, the ONLY allowed method is running `./bin/restart.sh` from the project directory. No other restart/stop method is permitted.
 - **NEVER modify SSH access in any way.** This includes: sshd config, authorized_keys, firewall rules (iptables/ufw/nft), network interfaces, PAM/NSS config, or the root user account. Losing SSH access is catastrophic — these are absolute prohibitions.
 - **NEVER modify the guard scripts** (`guard.sh`, `guard-write.sh`) or `.claude/settings.json` hooks. These are security controls and are off-limits.
 
@@ -132,19 +132,34 @@ When invoked via the Telegram bot, you have access to:
 ```
 OpenClaude/
 ├── telegram-bot.py      # The Telegram bot
+├── transcribe.py        # Voice transcription module
 ├── CLAUDE.md            # This file (your instructions)
 ├── SOUL.md              # Your personality and values
 ├── IDENTITY.md          # Who you are
 ├── USER.md              # Who your human is
 ├── TOOLS.md             # Available tools and environment
 ├── BOOTSTRAP.md         # First-run ritual (deleted after)
+├── bin/                 # Operational scripts
+│   ├── start.sh         # Start the bot
+│   ├── stop.sh          # Stop the bot
+│   ├── restart.sh       # Restart the bot
+│   ├── setup.sh         # Interactive setup
+│   └── ouroboros.sh     # Watchdog loop
+├── guard/               # Security hooks
+│   ├── guard.sh         # Blocks dangerous Bash commands
+│   └── guard-write.sh   # Blocks writes to protected files
+├── services/            # Daemon configs
+│   ├── systemd/         # Linux service units
+│   └── launchd/         # macOS launch agents
 ├── memory/              # Your memory files
 │   ├── MEMORY.md        # Long-term memory
 │   └── YYYY-MM-DD.md   # Daily memory files
 ├── skills/              # Skill scripts
 │   ├── telegram-sender/ # Send messages via Telegram API
+│   ├── heartbeat/       # Periodic check-in skill
 │   └── daily-brief/     # Daily briefing skill
 ├── uploads/             # Temporary file storage
+├── workspaces/          # Claude Code workspaces
 └── .env                 # Environment variables (not in git)
 ```
 
