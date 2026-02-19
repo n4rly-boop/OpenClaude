@@ -45,7 +45,7 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
 WORKING_DIR = os.getenv("WORKING_DIR") or str(SCRIPT_DIR)
 
 # Uploads directory for voice, files, photos
-UPLOADS_DIR = SCRIPT_DIR / "uploads"
+UPLOADS_DIR = SCRIPT_DIR / "workspaces" / "uploads"
 
 # Workspaces directory for per-chat isolation
 WORKSPACES_DIR = SCRIPT_DIR / "workspaces"

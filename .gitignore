@@ -14,9 +14,7 @@ build/
 .telegram-claude-sessions.json
 ~/.openclaude-sessions.json
 
-# Uploads (keep directory)
-uploads/*
-!uploads/.gitkeep
+# Uploads (inside workspaces, already gitignored)
 
 # Memory contents (keep directory)
 memory/*

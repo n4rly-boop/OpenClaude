@@ -173,7 +173,7 @@ DEEPGRAM_API_KEY=your-deepgram-key
 
 ### File and Photo Handling
 
-Send a document or photo on Telegram and the bot will download it to `uploads/YYYY-MM-DD/` and tell Claude the file path. Claude can then read, analyze, or process the file using its tools. Add a caption to your file to give Claude context about what you want done with it.
+Send a document or photo on Telegram and the bot will download it to `workspaces/uploads/YYYY-MM-DD/` and tell Claude the file path. Claude can then read, analyze, or process the file using its tools. Add a caption to your file to give Claude context about what you want done with it.
 
 ## Security
 
