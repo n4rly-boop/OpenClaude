@@ -28,6 +28,9 @@ memory/*
 *.mp3
 *.mp4
 
+# Per-chat workspaces
+workspaces/
+
 # Runtime
 .bot.pid
 bot.log

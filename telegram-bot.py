@@ -47,13 +47,21 @@ WORKING_DIR = os.getenv("WORKING_DIR") or str(SCRIPT_DIR)
 # Uploads directory for voice, files, photos
 UPLOADS_DIR = SCRIPT_DIR / "uploads"
 
-# Parse allowed users
+# Workspaces directory for per-chat isolation
+WORKSPACES_DIR = SCRIPT_DIR / "workspaces"
+
+# Parse allowed users (preserving order — first entry is admin)
 ALLOWED_USERS: set[int] = set()
+ALLOWED_USERS_LIST: list[int] = []
 if ALLOWED_USERS_RAW.strip():
     for uid in ALLOWED_USERS_RAW.split(","):
         uid = uid.strip()
         if uid.isdigit():
             ALLOWED_USERS.add(int(uid))
+            ALLOWED_USERS_LIST.append(int(uid))
+
+# Admin is the first allowed user — their private chat uses the original WORKING_DIR
+ADMIN_USER_ID: int | None = ALLOWED_USERS_LIST[0] if ALLOWED_USERS_LIST else None
 
 # Session file
 SESSION_FILE = Path.home() / ".openclaude-sessions.json"
@@ -134,6 +142,105 @@ def clear_session(chat_id: int, thread_id: int, user_id: int) -> None:
     if key in sessions:
         del sessions[key]
         save_sessions(sessions)
+
+
+# ---------------------------------------------------------------------------
+# Per-Chat Workspaces
+# ---------------------------------------------------------------------------
+
+# Shared files are symlinked into each workspace so updates propagate automatically
+_SYMLINKED_FILES = ["TOOLS.md", "CLAUDE.md"]
+_SYMLINKED_DIRS = [".claude"]
+# BOOTSTRAP.md is always freshly copied so new sessions run the first-run ritual
+# It creates SOUL.md, IDENTITY.md, USER.md per-workspace — no global originals needed
+_BOOTSTRAP_FILE = "BOOTSTRAP.md"
+
+
+def ensure_workspace(chat_id: int) -> Path:
+    """Create and return an isolated workspace directory for the given chat.
+
+    Workspace layout:
+      workspaces/c{chat_id}/
+        TOOLS.md       → symlink to ../../TOOLS.md
+        CLAUDE.md      → symlink to ../../CLAUDE.md
+        .claude/       → symlink to ../../.claude
+        SOUL.md        ← independent copy (set up via BOOTSTRAP.md)
+        IDENTITY.md    ← independent copy (set up via BOOTSTRAP.md)
+        USER.md        ← independent copy
+        BOOTSTRAP.md   ← fresh copy every new session
+        memory/        ← isolated per-chat memory
+          MEMORY.md
+    """
+    workspace = WORKSPACES_DIR / f"c{chat_id}"
+    if workspace.exists():
+        # Ensure symlinks are up to date (e.g. new shared files added)
+        _sync_workspace_links(workspace)
+        # Refresh BOOTSTRAP.md so it's present for new sessions
+        base = Path(WORKING_DIR)
+        bootstrap = base / _BOOTSTRAP_FILE
+        if bootstrap.exists():
+            shutil.copy2(bootstrap, workspace / _BOOTSTRAP_FILE)
+        return workspace
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    base = Path(WORKING_DIR)
+
+    # Symlink shared files
+    for fname in _SYMLINKED_FILES:
+        src = base / fname
+        dst = workspace / fname
+        if src.exists() and not dst.exists():
+            dst.symlink_to(os.path.relpath(src, workspace))
+
+    # Symlink shared directories
+    for dname in _SYMLINKED_DIRS:
+        src = base / dname
+        dst = workspace / dname
+        if src.exists() and not dst.exists():
+            dst.symlink_to(os.path.relpath(src, workspace))
+
+    # Always copy BOOTSTRAP.md fresh so new sessions run the first-run ritual
+    bootstrap = base / _BOOTSTRAP_FILE
+    if bootstrap.exists():
+        shutil.copy2(bootstrap, workspace / _BOOTSTRAP_FILE)
+
+    # Create isolated memory directory
+    mem_dir = workspace / "memory"
+    mem_dir.mkdir(exist_ok=True)
+    mem_template = base / "memory" / "MEMORY.md"
+    mem_dst = mem_dir / "MEMORY.md"
+    if mem_template.exists() and not mem_dst.exists():
+        shutil.copy2(mem_template, mem_dst)
+
+    logger.info("Created workspace for chat %d at %s", chat_id, workspace)
+    return workspace
+
+
+def _sync_workspace_links(workspace: Path) -> None:
+    """Ensure symlinks in an existing workspace point to current shared files."""
+    base = Path(WORKING_DIR)
+    for fname in _SYMLINKED_FILES:
+        src = base / fname
+        dst = workspace / fname
+        if src.exists() and not dst.exists():
+            dst.symlink_to(os.path.relpath(src, workspace))
+    for dname in _SYMLINKED_DIRS:
+        src = base / dname
+        dst = workspace / dname
+        if src.exists() and not dst.exists():
+            dst.symlink_to(os.path.relpath(src, workspace))
+
+
+def get_working_dir(chat_id: int, user_id: int) -> str:
+    """Return the working directory for a given chat.
+
+    Admin's private chat (chat_id == user_id == ADMIN_USER_ID) uses the
+    original WORKING_DIR so they can edit shared files directly.
+    All other chats get isolated workspaces.
+    """
+    if ADMIN_USER_ID and chat_id == user_id == ADMIN_USER_ID:
+        return WORKING_DIR
+    return str(ensure_workspace(chat_id))
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +479,8 @@ def _finished_line(active_line: str) -> str:
     return f"\u2713 {text}"
 
 
-async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int):
+async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int,
+                        working_dir: str | None = None):
     """Stream Claude CLI output and yield events as they arrive.
 
     Yields dicts with keys:
@@ -381,6 +489,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
       - {"type": "result", "text": "...", "session_id": "..."}
       - {"type": "error", "text": "..."}
     """
+    cwd = working_dir or WORKING_DIR
     session_id = get_session_id(chat_id, thread_id, user_id)
 
     if not session_id:
@@ -426,7 +535,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=WORKING_DIR,
+            cwd=cwd,
             env=env,
         )
 
@@ -633,9 +742,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if updated := user_data.get("updated_at"):
         status_lines.append(f"<b>Last active:</b> {updated}")
 
+    chat_dir = get_working_dir(chat_id, user.id)
     status_lines.extend([
         f"",
-        f"<b>Working dir:</b> <code>{WORKING_DIR}</code>",
+        f"<b>Working dir:</b> <code>{chat_dir}</code>",
         f"<b>Allowed tools:</b> {ALLOWED_TOOLS}",
     ])
 
@@ -686,9 +796,11 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
     response_text = None
+    chat_working_dir = get_working_dir(chat_id, user_id)
 
     async with _get_user_lock(user_id):
-        async for event in stream_claude(claude_message, chat_id, thread_id, user_id):
+        async for event in stream_claude(claude_message, chat_id, thread_id, user_id,
+                                         working_dir=chat_working_dir):
             etype = event.get("type")
 
             if etype == "tool_use":
