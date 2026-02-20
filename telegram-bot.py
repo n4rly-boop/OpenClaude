@@ -1062,7 +1062,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     workspace = ensure_workspace(chat_id)
-    voice_dir = workspace / "uploads" / "voice"
+    voice_dir = workspace / "uploads" / f"t{thread_id}" / "voice"
     voice_dir.mkdir(parents=True, exist_ok=True)
     ogg_path = voice_dir / f"{voice.file_id}.ogg"
 
@@ -1110,7 +1110,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     workspace = ensure_workspace(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    dest_dir = workspace / "uploads" / today
+    dest_dir = workspace / "uploads" / f"t{thread_id}" / today
     dest_dir.mkdir(parents=True, exist_ok=True)
     # Sanitize filename: strip path components to prevent path traversal
     safe_name = Path(doc.file_name).name if doc.file_name else f"file_{doc.file_id}"
@@ -1159,7 +1159,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     workspace = ensure_workspace(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    dest_dir = workspace / "uploads" / today
+    dest_dir = workspace / "uploads" / f"t{thread_id}" / today
     dest_dir.mkdir(parents=True, exist_ok=True)
     safe_name = Path(video.file_name).name if video.file_name else f"video_{video.file_id}.mp4"
     dest = dest_dir / safe_name
@@ -1210,7 +1210,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     workspace = ensure_workspace(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    dest_dir = workspace / "uploads" / today
+    dest_dir = workspace / "uploads" / f"t{thread_id}" / today
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"photo_{photo.file_unique_id}.jpg"
 
