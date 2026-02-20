@@ -64,9 +64,8 @@ ADMIN_USER_ID: int | None = ALLOWED_USERS_LIST[0] if ALLOWED_USERS_LIST else Non
 # Session file
 SESSION_FILE = Path.home() / ".openclaude-sessions.json"
 
-# Claude CLI allowed tools — non-admin users don't get Bash
-ADMIN_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,Skill"
-USER_TOOLS = "Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,Task,Skill"
+# Claude CLI allowed tools — everyone gets all tools; guard hooks enforce restrictions
+ALL_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,WebFetch,WebSearch,Task,Skill"
 
 # Telegram message limit
 TELEGRAM_MAX_LENGTH = 4096
@@ -601,13 +600,6 @@ def _finished_line(active_line: str) -> str:
     return f"\u2713 {text}"
 
 
-def _tools_for_user(user_id: int) -> str:
-    """Return the allowed tools string for a user."""
-    if ADMIN_USER_ID and user_id == ADMIN_USER_ID:
-        return ADMIN_TOOLS
-    return USER_TOOLS
-
-
 async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int,
                         working_dir: str | None = None):
     """Stream Claude CLI output and yield events as they arrive.
@@ -629,9 +621,12 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
         is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
 
         if not session_id:
-            sandbox_notice = ""
-            if not is_admin:
-                sandbox_notice = (
+            if is_admin:
+                access_notice = (
+                    "\n\n[ADMIN REQUEST — you have full access to the project.]"
+                )
+            else:
+                access_notice = (
                     "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
                     "You are in an isolated workspace. You must NEVER access anything outside it.\n"
                     "- Stay in the current working directory. Never use ../, absolute paths, "
@@ -643,7 +638,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             preamble = (
                 "You are starting a new session. Read CLAUDE.md first, "
                 "then follow its startup sequence before responding. "
-                f"{sandbox_notice}"
+                f"{access_notice}"
                 "The user's message is:\n\n"
             )
             message = preamble + message
@@ -656,7 +651,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             "--output-format", "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--allowedTools", _tools_for_user(user_id),
+            "--allowedTools", ALL_TOOLS,
         ]
 
         if session_id:
@@ -674,6 +669,8 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         env["IS_SANDBOX"] = "1"
+        env["OPENCLAUDE_IS_ADMIN"] = "1" if is_admin else "0"
+        env["OPENCLAUDE_WORKSPACE"] = cwd
         local_bin = str(Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
@@ -907,7 +904,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status_lines.extend([
         f"",
         f"<b>Working dir:</b> <code>{chat_dir}</code>",
-        f"<b>Allowed tools:</b> {_tools_for_user(user.id)}",
+        f"<b>Allowed tools:</b> {ALL_TOOLS}",
     ])
 
     await update.message.reply_text(

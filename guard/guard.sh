@@ -12,7 +12,7 @@ fi
 # Also check Write/Edit tool for protected file paths
 FILEPATH=$(echo "$CLAUDE_TOOL_INPUT" | jq -r '.file_path // empty' 2>/dev/null)
 
-# ── Blocked patterns ──────────────────────────────────────────────────
+# ── Blocked patterns (everyone) ──────────────────────────────────────
 
 # 1. Service management (bot, ouroboros, or any service stop/restart)
 if echo "$CMD" | grep -qiE "systemctl|service\s+(stop|restart|start)|kill\s|pkill\s|killall\s|claude-telegram-bot|ouroboros"; then
@@ -48,6 +48,43 @@ fi
 if echo "$CMD" | grep -qiE "\b(passwd|usermod|userdel|chage)\b.*\broot\b|deluser\s+root"; then
     echo "BLOCKED: You are not allowed to modify the root account." >&2
     exit 2
+fi
+
+# ── Non-admin additional restrictions ────────────────────────────────
+if [ "$OPENCLAUDE_IS_ADMIN" != "1" ]; then
+    WORKSPACE="${OPENCLAUDE_WORKSPACE:-}"
+
+    # 7. Package management — non-admin cannot install/remove packages
+    if echo "$CMD" | grep -qiE "\b(pip|pip3)\s+install|\b(npm|npx|yarn|pnpm)\s+(install|add|remove)|\b(apt|apt-get|dpkg|snap)\s+(install|remove|purge)|\bcargo\s+install|\bgem\s+install"; then
+        echo "BLOCKED: You are not allowed to install or remove packages." >&2
+        exit 2
+    fi
+
+    # 8. Git operations — non-admin cannot run git commands that affect the repo
+    if echo "$CMD" | grep -qiE "\bgit\s+(push|pull|checkout|reset|rebase|merge|branch\s+-[dD]|remote|stash|cherry-pick|revert|commit|add|rm|clean)"; then
+        echo "BLOCKED: You are not allowed to run git commands that modify the repository." >&2
+        exit 2
+    fi
+
+    # 9. chmod/chown on files outside workspace
+    if [ -n "$WORKSPACE" ]; then
+        if echo "$CMD" | grep -qiE "\b(chmod|chown)\b"; then
+            # Extract paths from chmod/chown — block if any path is outside workspace
+            # Simple heuristic: block if command doesn't reference workspace path
+            if ! echo "$CMD" | grep -qF "$WORKSPACE"; then
+                echo "BLOCKED: You can only change permissions on files within your workspace." >&2
+                exit 2
+            fi
+        fi
+
+        # 10. rm -rf on paths outside workspace
+        if echo "$CMD" | grep -qiE "\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r"; then
+            if ! echo "$CMD" | grep -qF "$WORKSPACE"; then
+                echo "BLOCKED: You can only delete files within your workspace." >&2
+                exit 2
+            fi
+        fi
+    fi
 fi
 
 # All clear

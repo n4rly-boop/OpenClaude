@@ -8,7 +8,17 @@ if [ -z "$FILEPATH" ]; then
     exit 0
 fi
 
-# Block writes to SSH config, keys, firewall, PAM, and system auth files
+# ── Non-admin users: block writes outside their workspace ────────────
+if [ "$OPENCLAUDE_IS_ADMIN" != "1" ]; then
+    REAL_PATH=$(realpath "$FILEPATH" 2>/dev/null || echo "$FILEPATH")
+    WORKSPACE="$OPENCLAUDE_WORKSPACE"
+    if [ -n "$WORKSPACE" ] && [[ "$REAL_PATH" != "$WORKSPACE"/* ]]; then
+        echo "BLOCKED: You can only modify files within your workspace." >&2
+        exit 2
+    fi
+fi
+
+# ── Everyone: block writes to critical system files ──────────────────
 if echo "$FILEPATH" | grep -qiE "/etc/ssh|authorized_keys|known_hosts|/etc/pam\.|/etc/nsswitch|/etc/shadow|/etc/passwd|/etc/iptables|/etc/nftables|/etc/ufw|guard\.sh|guard-write\.sh"; then
     echo "BLOCKED: You are not allowed to modify this protected file: $FILEPATH" >&2
     exit 2
