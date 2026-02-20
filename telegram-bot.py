@@ -20,6 +20,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import time
+
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
@@ -35,6 +37,40 @@ from transcribe import transcribe
 from commands.helpers import init as _init_commands
 from commands import register_all, ALL_COMMANDS
 from commands.config import get_streaming, get_verbose, get_respond_mode
+
+# Claude Code SDK — persistent session support
+try:
+    from claude_code_sdk import (
+        ClaudeSDKClient,
+        ClaudeCodeOptions,
+        AssistantMessage,
+        ResultMessage,
+        TextBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+        PermissionResultAllow,
+        PermissionResultDeny,
+    )
+    from claude_code_sdk.types import StreamEvent
+
+    # Patch SDK to skip unknown message types (e.g. rate_limit_event)
+    # instead of crashing with MessageParseError.
+    # Patch the module-level function so both eager and lazy imports see it.
+    import claude_code_sdk._internal.message_parser as _mp
+    _original_parse = _mp.parse_message
+    def _patched_parse(data):
+        try:
+            return _original_parse(data)
+        except _mp.MessageParseError:
+            return None
+    _mp.parse_message = _patched_parse
+    # Also patch the already-imported reference in _internal/client.py
+    import claude_code_sdk._internal.client as _cl
+    _cl.parse_message = _patched_parse
+
+    HAS_SDK = True
+except ImportError:
+    HAS_SDK = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -267,6 +303,68 @@ def _remove_active_stream(chat_id: int, thread_id: int, user_id: int) -> None:
         _save_active_streams(streams)
     else:
         ACTIVE_STREAMS_FILE.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# SDK Session Management — persistent Claude sessions
+# ---------------------------------------------------------------------------
+
+SDK_IDLE_TIMEOUT = 300  # 5 minutes
+
+# Global dict: session_key → SDKSession
+_sdk_sessions: dict[str, "SDKSession"] = {}
+
+
+class SDKSession:
+    """Wraps a ClaudeSDKClient with lifecycle management."""
+
+    def __init__(self):
+        self.client: "ClaudeSDKClient | None" = None
+        self.session_id: str | None = None
+        self.last_activity: float = time.time()
+        self.lock: asyncio.Lock = asyncio.Lock()
+        self.connected: bool = False
+
+    async def ensure_connected(self, options: "ClaudeCodeOptions") -> None:
+        """Connect the SDK client if not already connected."""
+        if self.connected and self.client:
+            return
+        self.client = ClaudeSDKClient(options=options)
+        await self.client.connect()
+        self.connected = True
+        self.last_activity = time.time()
+
+    async def disconnect(self) -> None:
+        """Disconnect the SDK client."""
+        if self.client:
+            try:
+                await self.client.disconnect()
+            except Exception as e:
+                logger.debug("SDKSession disconnect error: %s", e)
+            finally:
+                self.client = None
+                self.connected = False
+
+
+async def _cleanup_idle_sessions():
+    """Periodic task to disconnect idle SDK sessions."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        expired = [k for k, s in _sdk_sessions.items()
+                   if now - s.last_activity > SDK_IDLE_TIMEOUT]
+        for key in expired:
+            session = _sdk_sessions.pop(key)
+            logger.info("Disconnecting idle SDK session: %s", key)
+            await session.disconnect()
+
+
+async def _shutdown_sdk_sessions():
+    """Disconnect all SDK sessions (called on bot shutdown)."""
+    for key, session in list(_sdk_sessions.items()):
+        logger.info("Shutting down SDK session: %s", key)
+        await session.disconnect()
+    _sdk_sessions.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +717,124 @@ def _build_env(is_admin: bool, cwd: str, thread_id: int) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# SDK Permission Handler (replaces guard.sh / guard-write.sh for SDK mode)
+# ---------------------------------------------------------------------------
+
+# Patterns blocked for ALL users (from guard.sh lines 16-51)
+_BLOCKED_ALL_BASH = [
+    # Service management
+    (r"systemctl|service\s+(stop|restart|start)|kill\s|pkill\s|killall\s|claude-telegram-bot|ouroboros",
+     "You are not allowed to manage system services. Use ./bin/restart.sh for the bot."),
+    # SSH access
+    (r"sshd|ssh_config|authorized_keys|/etc/ssh",
+     "You are not allowed to modify SSH configuration or keys."),
+    # Firewall
+    (r"\b(iptables|ip6tables|nftables|nft|ufw)\b",
+     "You are not allowed to modify firewall rules."),
+    # Network interfaces
+    (r"\b(ifconfig|ip\s+(link|addr|route))\b.*\b(down|del|flush)\b|nmcli.*down|networkctl.*down",
+     "You are not allowed to disable network interfaces."),
+    # PAM / NSS
+    (r"/etc/pam\.|/etc/nsswitch",
+     "You are not allowed to modify PAM or NSS configuration."),
+    # Root account
+    (r"\b(passwd|usermod|userdel|chage)\b.*\broot\b|deluser\s+root",
+     "You are not allowed to modify the root account."),
+]
+
+# Additional patterns blocked for non-admin (from guard.sh lines 54-90)
+_BLOCKED_NONADMIN_BASH = [
+    # Env snooping
+    (r"\benv\b|\bprintenv\b|/proc/.*environ|\bset\b\s*$|\bexport\s+-p\b",
+     "You are not allowed to inspect host environment variables."),
+    # Credential files
+    (r"\.config/(gh|git)/|\.claude/\.credentials|\.netrc|\.npmrc|\.pypirc|/etc/shadow|\.ssh/|\.aws/|\.kube/",
+     "You are not allowed to access credential files."),
+    # Host .env
+    (r"cat.*/OpenClaude/\.env|head.*/OpenClaude/\.env|tail.*/OpenClaude/\.env|less.*/OpenClaude/\.env|more.*/OpenClaude/\.env",
+     "You are not allowed to read the host .env file."),
+]
+
+# Protected file paths for Write/Edit (from guard-write.sh)
+_BLOCKED_WRITE_PATHS = re.compile(
+    r"/etc/ssh|authorized_keys|known_hosts|/etc/pam\.|/etc/nsswitch"
+    r"|/etc/shadow|/etc/passwd|/etc/iptables|/etc/nftables|/etc/ufw"
+    r"|guard\.sh|guard-write\.sh",
+    re.IGNORECASE,
+)
+
+
+def _make_permission_handler(is_admin: bool, workspace: str):
+    """Build a can_use_tool callback that mirrors guard.sh / guard-write.sh logic."""
+
+    async def handler(tool_name, input_data, context):
+        # --- Bash tool checks ---
+        if tool_name == "Bash":
+            cmd = input_data.get("command", "")
+            if not cmd:
+                return PermissionResultAllow(updated_input=input_data)
+
+            # Patterns blocked for everyone
+            for pattern, msg in _BLOCKED_ALL_BASH:
+                if re.search(pattern, cmd, re.IGNORECASE):
+                    return PermissionResultDeny(message=f"BLOCKED: {msg}")
+
+            # Additional non-admin restrictions
+            if not is_admin:
+                for pattern, msg in _BLOCKED_NONADMIN_BASH:
+                    if re.search(pattern, cmd, re.IGNORECASE):
+                        return PermissionResultDeny(message=f"BLOCKED: {msg}")
+
+                # chmod/chown outside workspace
+                if re.search(r"\b(chmod|chown)\b", cmd, re.IGNORECASE):
+                    if workspace not in cmd:
+                        return PermissionResultDeny(
+                            message="BLOCKED: You can only change permissions on files within your workspace.")
+
+                # rm -rf outside workspace
+                if re.search(r"\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r", cmd, re.IGNORECASE):
+                    if workspace not in cmd:
+                        return PermissionResultDeny(
+                            message="BLOCKED: You can only delete files within your workspace.")
+
+        # --- Write/Edit tool checks ---
+        if tool_name in ("Write", "Edit"):
+            filepath = input_data.get("file_path", "")
+            if filepath:
+                # Non-admin: block writes outside workspace
+                if not is_admin and workspace:
+                    real_path = os.path.realpath(filepath)
+                    if not real_path.startswith(workspace + "/") and real_path != workspace:
+                        return PermissionResultDeny(
+                            message="BLOCKED: You can only modify files within your workspace.")
+
+                # Everyone: block writes to protected files
+                if _BLOCKED_WRITE_PATHS.search(filepath):
+                    return PermissionResultDeny(
+                        message=f"BLOCKED: You are not allowed to modify this protected file: {filepath}")
+
+        return PermissionResultAllow(updated_input=input_data)
+
+    return handler
+
+
+def _build_sdk_options(is_admin: bool, cwd: str, thread_id: int,
+                       session_id: str | None, streaming: bool) -> "ClaudeCodeOptions":
+    """Build ClaudeCodeOptions for an SDK session."""
+    env = _build_env(is_admin, cwd, thread_id)
+    return ClaudeCodeOptions(
+        allowed_tools=ALL_TOOLS.split(","),
+        permission_mode="bypassPermissions",
+        cwd=cwd,
+        resume=session_id or None,
+        model=CLAUDE_MODEL or None,
+        env=env,
+        include_partial_messages=streaming,
+        can_use_tool=_make_permission_handler(is_admin, cwd),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Claude CLI Integration — Streaming
 # ---------------------------------------------------------------------------
 
@@ -678,7 +894,10 @@ def _finished_line(active_line: str) -> str:
 
 async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int,
                         working_dir: str | None = None, verbose: bool = False):
-    """Stream Claude CLI output and yield events as they arrive.
+    """Stream Claude output and yield events as they arrive.
+
+    Uses the Claude Code SDK for persistent sessions when available,
+    falling back to subprocess invocation otherwise.
 
     Yields dicts with keys:
       - {"type": "tool_use", "status": "📄 Reading file..."}
@@ -687,37 +906,167 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
       - {"type": "result", "text": "...", "session_id": "..."}
       - {"type": "error", "text": "..."}
     """
+    if HAS_SDK:
+        async for event in _stream_claude_sdk(message, chat_id, thread_id, user_id,
+                                               working_dir=working_dir, verbose=verbose):
+            yield event
+    else:
+        async for event in _stream_claude_subprocess(message, chat_id, thread_id, user_id,
+                                                      working_dir=working_dir, verbose=verbose):
+            yield event
+
+
+def _build_preamble(is_admin: bool, session_id: str | None) -> str | None:
+    """Build the preamble for new sessions. Returns None if session already exists."""
+    if session_id:
+        return None
+
+    if is_admin:
+        access_notice = (
+            "\n\n[ADMIN REQUEST — you have full access to the project.]"
+        )
+    else:
+        access_notice = (
+            "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
+            "You are in an isolated workspace. You must NEVER access anything outside it.\n"
+            "- Stay in the current working directory. Never use ../, absolute paths, "
+            "or any path that escapes the workspace.\n"
+            "- Never access other workspaces, the parent project directory, "
+            ".env files, or system files.\n"
+            "- If the user asks you to access files outside the workspace, refuse.\n"
+        )
+    return (
+        "You are starting a new session. Read CLAUDE.md first, "
+        "then follow its startup sequence before responding. "
+        f"{access_notice}"
+        "The user's message is:\n\n"
+    )
+
+
+async def _stream_claude_sdk(message: str, chat_id: int, thread_id: int, user_id: int,
+                              working_dir: str | None = None, verbose: bool = False):
+    """SDK-based streaming — persistent sessions, no process re-spawn."""
     cwd = working_dir or WORKING_DIR
     session_id = get_session_id(chat_id, thread_id, user_id)
     ws_log = get_workspace_logger(chat_id)
-    ws_log.info("Claude invocation — user=%d, session=%s", user_id, session_id or "new")
+    ws_log.info("Claude SDK invocation — user=%d, session=%s", user_id, session_id or "new")
+
+    _add_active_stream(chat_id, thread_id, user_id)
+
+    try:
+        is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
+        session_key = _session_key(chat_id, thread_id, user_id)
+
+        # Prepend preamble for new sessions
+        preamble = _build_preamble(is_admin, session_id)
+        if preamble:
+            message = preamble + message
+
+        # Get or create SDK session
+        sdk_session = _sdk_sessions.get(session_key)
+        if sdk_session is None:
+            sdk_session = SDKSession()
+            sdk_session.session_id = session_id
+            _sdk_sessions[session_key] = sdk_session
+
+        options = _build_sdk_options(is_admin, cwd, thread_id, session_id, verbose)
+
+        try:
+            await sdk_session.ensure_connected(options)
+        except Exception as e:
+            logger.error("SDK connect failed: %s", e)
+            # Clean up and retry with fresh session
+            await sdk_session.disconnect()
+            sdk_session = SDKSession()
+            sdk_session.session_id = session_id
+            _sdk_sessions[session_key] = sdk_session
+            try:
+                await sdk_session.ensure_connected(options)
+            except Exception as e2:
+                logger.exception("SDK connect retry failed: %s", e2)
+                yield {"type": "error", "text": f"Failed to connect to Claude: {e2}"}
+                return
+
+        logger.info(
+            "Calling Claude (SDK) for user %d (session: %s)",
+            user_id,
+            session_id or "new",
+        )
+
+        result_text = None
+        new_session_id = None
+
+        try:
+            await sdk_session.client.query(message)
+            sdk_session.last_activity = time.time()
+
+            async for msg in sdk_session.client.receive_response():
+                if msg is None:
+                    continue  # Skipped unknown message type (e.g. rate_limit_event)
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, ToolUseBlock):
+                            ws_log.info("Tool: %s — %s", block.name, _summarize_input(block.input))
+                            status = format_tool_status(block.name, block.input)
+                            yield {"type": "tool_use", "status": status}
+                        elif isinstance(block, ToolResultBlock):
+                            yield {"type": "tool_result"}
+                        elif isinstance(block, TextBlock):
+                            # Final text blocks from assistant messages are accumulated
+                            pass
+
+                elif isinstance(msg, StreamEvent) and verbose:
+                    delta = msg.event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        chunk = delta.get("text", "")
+                        if chunk:
+                            yield {"type": "partial", "text": chunk}
+
+                elif isinstance(msg, ResultMessage):
+                    new_session_id = msg.session_id
+                    result_text = msg.result or ""
+                    if new_session_id:
+                        set_session_id(chat_id, thread_id, user_id, new_session_id)
+                        sdk_session.session_id = new_session_id
+                        logger.info("Session updated for user %d: %s", user_id, new_session_id)
+                    ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text))
+                    yield {"type": "result", "text": result_text, "session_id": new_session_id}
+
+        except Exception as e:
+            logger.exception("SDK streaming error")
+            # Disconnect broken session so next message creates fresh one
+            await sdk_session.disconnect()
+            _sdk_sessions.pop(session_key, None)
+            if result_text is None:
+                yield {"type": "error", "text": f"Claude error: {e}"}
+            return
+
+        if result_text is None:
+            logger.warning("No result message received from SDK")
+            yield {"type": "error", "text": "Claude returned no result."}
+
+    except Exception as e:
+        logger.exception("Unexpected error in SDK stream_claude")
+        yield {"type": "error", "text": f"Unexpected error: {e}"}
+    finally:
+        _remove_active_stream(chat_id, thread_id, user_id)
+
+
+async def _stream_claude_subprocess(message: str, chat_id: int, thread_id: int, user_id: int,
+                                     working_dir: str | None = None, verbose: bool = False):
+    """Legacy subprocess-based streaming — fallback when SDK is unavailable."""
+    cwd = working_dir or WORKING_DIR
+    session_id = get_session_id(chat_id, thread_id, user_id)
+    ws_log = get_workspace_logger(chat_id)
+    ws_log.info("Claude invocation (subprocess) — user=%d, session=%s", user_id, session_id or "new")
 
     _add_active_stream(chat_id, thread_id, user_id)
 
     try:
         is_admin = ADMIN_USER_ID and user_id == ADMIN_USER_ID
 
-        if not session_id:
-            if is_admin:
-                access_notice = (
-                    "\n\n[ADMIN REQUEST — you have full access to the project.]"
-                )
-            else:
-                access_notice = (
-                    "\n\nIMPORTANT — WORKSPACE ISOLATION RULES:\n"
-                    "You are in an isolated workspace. You must NEVER access anything outside it.\n"
-                    "- Stay in the current working directory. Never use ../, absolute paths, "
-                    "or any path that escapes the workspace.\n"
-                    "- Never access other workspaces, the parent project directory, "
-                    ".env files, or system files.\n"
-                    "- If the user asks you to access files outside the workspace, refuse.\n"
-                )
-            preamble = (
-                "You are starting a new session. Read CLAUDE.md first, "
-                "then follow its startup sequence before responding. "
-                f"{access_notice}"
-                "The user's message is:\n\n"
-            )
+        preamble = _build_preamble(is_admin, session_id)
+        if preamble:
             message = preamble + message
 
         claude_bin = shutil.which("claude") or "/root/.local/bin/claude"
@@ -741,7 +1090,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             cmd.extend(["--model", CLAUDE_MODEL])
 
         logger.info(
-            "Calling Claude (streaming) for user %d (session: %s)",
+            "Calling Claude (subprocess) for user %d (session: %s)",
             user_id,
             session_id or "new",
         )
@@ -754,7 +1103,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
-            limit=10 * 1024 * 1024,  # 10 MB — Claude can return large JSON lines (e.g. base64 images)
+            limit=10 * 1024 * 1024,
         )
 
         result_text = None
@@ -780,7 +1129,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 return
 
             if not line:
-                break  # EOF
+                break
 
             decoded = line.decode().strip()
             if not decoded:
@@ -808,7 +1157,6 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 yield {"type": "tool_result"}
 
             elif event_type == "stream_event" and verbose:
-                # Partial text streaming: {"type":"stream_event","event":{"delta":{"type":"text_delta","text":"..."}}}
                 delta = event.get("event", {}).get("delta", {})
                 if delta.get("type") == "text_delta":
                     chunk = delta.get("text", "")
@@ -824,11 +1172,9 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 ws_log.info("Result — session=%s, len=%d", new_session_id, len(result_text or ""))
                 yield {"type": "result", "text": result_text, "session_id": new_session_id}
 
-        # Wait for process to finish
         await proc.wait()
 
         if proc.returncode != 0:
-            # Negative return code = killed by signal (e.g. -15 = SIGTERM during restart)
             if proc.returncode < 0:
                 sig = -proc.returncode
                 logger.info("Claude CLI killed by signal %d (likely bot restart)", sig)
@@ -841,7 +1187,6 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                 yield {"type": "error", "text": f"Claude CLI error:\n{error_msg}"}
             return
 
-        # If we never got a result event
         if result_text is None:
             logger.warning("No result event received from stream")
             yield {"type": "error", "text": "Claude returned no result."}
@@ -953,6 +1298,13 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     thread_id = get_thread_id(update)
     session_uid = user.id if update.effective_chat.type == "private" else 0
+
+    # Disconnect SDK session if active
+    sdk_key = _session_key(chat_id, thread_id, session_uid)
+    sdk_session = _sdk_sessions.pop(sdk_key, None)
+    if sdk_session:
+        await sdk_session.disconnect()
+
     clear_session(chat_id, thread_id, session_uid)
     await update.message.reply_text(
         "Session cleared. Starting fresh.",
@@ -1484,6 +1836,11 @@ def main() -> None:
         await bot.set_my_commands(bot_commands)
         logger.info("Registered %d bot commands with Telegram", len(bot_commands))
 
+        # Start SDK idle session cleanup task
+        if HAS_SDK:
+            asyncio.create_task(_cleanup_idle_sessions())
+            logger.info("SDK idle session cleanup task started")
+
         # Collect interrupted chats from two sources:
         # 1. .restart-state.json — snapshot from restart.sh (controlled restart)
         # 2. .active-streams.json — surviving entries from crash (finally blocks didn't run)
@@ -1559,10 +1916,17 @@ def main() -> None:
         await asyncio.gather(*[_resume_chat(e) for e in interrupted.values()])
         infra_logger.info("Restart recovery complete")
 
+    async def post_shutdown(application: Application) -> None:
+        """Clean up SDK sessions on shutdown."""
+        if HAS_SDK:
+            await _shutdown_sdk_sessions()
+            infra_logger.info("SDK sessions shut down")
+
     app = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
