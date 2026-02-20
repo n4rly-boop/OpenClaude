@@ -1001,6 +1001,64 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+# ---------------------------------------------------------------------------
+# Message Batching — combine rapid-fire messages into one Claude turn
+# ---------------------------------------------------------------------------
+
+# Batch window: messages arriving within this many seconds are combined
+BATCH_WINDOW = 0.5
+
+# Per-session batch state
+_batch_buffers: dict[str, list[str]] = {}
+_batch_timers: dict[str, asyncio.TimerHandle] = {}
+_batch_updates: dict[str, tuple[Update, ContextTypes.DEFAULT_TYPE]] = {}
+_batch_meta: dict[str, tuple[int, int, int]] = {}  # key → (chat_id, thread_id, user_id)
+
+
+async def _queue_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         chat_id: int, thread_id: int, user_id: int,
+                         claude_message: str) -> None:
+    """Add a message to the batch buffer. After BATCH_WINDOW seconds of quiet, flush all."""
+    session_user_id = user_id if update.effective_chat.type == "private" else 0
+    key = _session_key(chat_id, thread_id, session_user_id)
+
+    _batch_buffers.setdefault(key, []).append(claude_message)
+    # Always keep the latest update so we reply to the last message
+    _batch_updates[key] = (update, context)
+    _batch_meta[key] = (chat_id, thread_id, user_id)
+
+    # Cancel previous timer, start a new one
+    if key in _batch_timers:
+        _batch_timers[key].cancel()
+
+    loop = asyncio.get_event_loop()
+    _batch_timers[key] = loop.call_later(
+        BATCH_WINDOW,
+        lambda k=key: asyncio.ensure_future(_flush_batch(k)),
+    )
+
+
+async def _flush_batch(key: str) -> None:
+    """Flush the batch buffer — combine messages and send to Claude."""
+    messages = _batch_buffers.pop(key, [])
+    update_ctx = _batch_updates.pop(key, None)
+    meta = _batch_meta.pop(key, None)
+    _batch_timers.pop(key, None)
+
+    if not messages or not update_ctx or not meta:
+        return
+
+    update, context = update_ctx
+    chat_id, thread_id, user_id = meta
+
+    if len(messages) == 1:
+        combined = messages[0]
+    else:
+        combined = "\n\n".join(messages)
+
+    await _run_with_streaming(update, context, chat_id, thread_id, user_id, combined)
+
+
 async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE,
                               chat_id: int, thread_id: int, user_id: int,
                               claude_message: str) -> None:
@@ -1183,7 +1241,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user.id, user.username or user.first_name, len(message_text),
     )
 
-    await _run_with_streaming(update, context, chat_id, thread_id, user.id, message_text)
+    await _queue_message(update, context, chat_id, thread_id, user.id, message_text)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1229,7 +1287,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User also wrote: "{caption}"'
 
-    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _queue_message(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1278,7 +1336,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _queue_message(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1326,7 +1384,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _queue_message(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1376,7 +1434,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if caption:
         claude_msg += f' User says: "{caption}"'
 
-    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
+    await _queue_message(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 # ---------------------------------------------------------------------------
