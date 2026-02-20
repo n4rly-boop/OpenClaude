@@ -71,8 +71,8 @@ for m in msgs:
     rm -f "$file"
 }
 
-sync_main() {
-    log "Syncing with origin/main..."
+sync_dev() {
+    log "Syncing with origin/dev..."
     cd "$PROJECT_DIR"
 
     if ! git fetch origin 2>/dev/null; then
@@ -83,20 +83,20 @@ sync_main() {
     # Only merge if there's something to merge
     local local_head remote_head
     local_head=$(git rev-parse HEAD 2>/dev/null)
-    remote_head=$(git rev-parse origin/main 2>/dev/null || echo "")
+    remote_head=$(git rev-parse origin/dev 2>/dev/null || echo "")
 
     if [[ -z "$remote_head" || "$local_head" == "$remote_head" ]]; then
-        log "Already up to date with origin/main"
+        log "Already up to date with origin/dev"
         return 0
     fi
 
-    if ! git merge origin/main --no-edit 2>/dev/null; then
+    if ! git merge origin/dev --no-edit 2>/dev/null; then
         git merge --abort 2>/dev/null || true
-        notify "[safe-restart] Merge conflict with origin/main on commit $(get_short_hash). Manual resolution needed."
+        notify "[safe-restart] Merge conflict with origin/dev on commit $(get_short_hash). Manual resolution needed."
         return 1
     fi
 
-    log "Merged origin/main successfully"
+    log "Merged origin/dev successfully"
     return 0
 }
 
@@ -158,8 +158,8 @@ start_service() {
 
 TEST_OUTPUT=""
 
-# Step 1: Sync with main
-if ! sync_main; then
+# Step 1: Sync with dev
+if ! sync_dev; then
     exit 1
 fi
 

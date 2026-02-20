@@ -152,8 +152,11 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         echo "  'dev' branch already exists."
     fi
 
-    # Switch to dev
+    # Switch to dev and push to origin so remote tracking exists
     git checkout dev 2>/dev/null || echo "  (could not switch to dev — you may have uncommitted changes)"
+    if git remote get-url origin &>/dev/null; then
+        git push -u origin dev 2>/dev/null || echo "  (could not push dev to origin — push manually later)"
+    fi
 
     # Seed known-good commit
     mkdir -p "$PROJECT_DIR/backups"
@@ -167,7 +170,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
 
     echo ""
     echo "  Workflow: the agent works on 'dev'. 'main' stays stable."
-    echo "  safe-restart.sh merges main→dev, runs tests, and rolls back on failure."
+    echo "  safe-restart.sh syncs from origin/dev, runs tests, and rolls back on failure."
 else
     echo "  Not a git repository — skipping branch setup."
 fi

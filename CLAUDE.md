@@ -140,6 +140,12 @@ The first user in ALLOWED_USERS is the **admin**. The environment variable
 - **NEVER modify the guard scripts** (`guard.sh`, `guard-write.sh`) or `.claude/settings.json` hooks. These are security controls and are off-limits.
 
 
+## Git Workflow
+
+- **Always commit and push to the `dev` branch.** Never push to `main`.
+- `main` is the stable branch — the human merges `dev → main` manually.
+- Before pushing, make sure you're on `dev`: `git checkout dev` if needed.
+
 ## Available Tools
 
 When invoked via the Telegram bot, you have access to:
