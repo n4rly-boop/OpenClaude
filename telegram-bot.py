@@ -671,6 +671,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
         env["IS_SANDBOX"] = "1"
         env["OPENCLAUDE_IS_ADMIN"] = "1" if is_admin else "0"
         env["OPENCLAUDE_WORKSPACE"] = cwd
+        env["OPENCLAUDE_THREAD_ID"] = str(thread_id)
         local_bin = str(Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")

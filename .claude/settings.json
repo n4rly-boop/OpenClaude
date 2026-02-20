@@ -21,7 +21,7 @@
       "matcher": "",
       "hooks": [{
         "type": "command",
-        "command": "bash -c 'echo \"=== LONG-TERM MEMORY ===\"; cat memory/MEMORY.md 2>/dev/null || echo \"(no long-term memory yet)\"; echo; echo \"=== TODAY MEMORY ===\"; cat memory/$(date +%Y-%m-%d).md 2>/dev/null || echo \"(no entries today yet)\"'"
+        "command": "bash -c 'TID=\"${OPENCLAUDE_THREAD_ID:-0}\"; echo \"=== LONG-TERM MEMORY ===\"; cat memory/MEMORY.md 2>/dev/null || echo \"(no long-term memory yet)\"; echo; echo \"=== TOPIC MEMORY (t$TID) ===\"; cat memory/t$TID/MEMORY.md 2>/dev/null || echo \"(no topic memory yet)\"; echo; echo \"=== TODAY TOPIC LOG (t$TID) ===\"; cat memory/t$TID/$(date +%Y-%m-%d).md 2>/dev/null || echo \"(no entries today yet)\"; echo; echo \"[Write daily memory to memory/t$TID/]\"; echo \"[Topic thread ID: $TID]\"'"
       }]
     }],
     "PreToolUse": [

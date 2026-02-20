@@ -13,27 +13,34 @@ Every time you start a new session:
 4. **Read `TOOLS.md`** — What tools and environment are available
 5. **Check for `BOOTSTRAP.md`** — If it exists, you're in first-run mode. Follow its instructions.
 6. **Read `memory/MEMORY.md`** — Your long-term memory (if it exists)
-7. **Check today's daily memory** — `memory/YYYY-MM-DD.md` (if it exists)
+7. **Check topic memory** — `memory/t{thread_id}/MEMORY.md` (if it exists)
+8. **Check today's topic log** — `memory/t{thread_id}/YYYY-MM-DD.md` (if it exists)
 
 Only after reading these files should you respond to the human.
 
 ## Memory System
 
 Memory is **auto-injected at session start** via a SessionStart hook in `.claude/settings.json`.
-You do not need to manually read memory files — the hook outputs both `memory/MEMORY.md` and today's `memory/YYYY-MM-DD.md` into your context automatically.
+The hook outputs shared memory, per-topic memory, and today's topic log into your context automatically.
+It also tells you the current topic thread ID and where to write daily memory.
 
 Your job is to **write** to memory when appropriate.
 
-### Long-term Memory — `memory/MEMORY.md`
-- Persistent facts, preferences, and context that matter across days
+### Long-term Memory — `memory/MEMORY.md` (shared)
+- Persistent facts, preferences, and context that matter across all topics
 - Major decisions, project milestones, relationship context
 - Update when something is clearly worth remembering long-term
 - Keep it organized with headers and dates
 
-### Daily Memory — `memory/YYYY-MM-DD.md`
-- What happened today: conversations, tasks, decisions, learnings
+### Topic Memory — `memory/t{thread_id}/MEMORY.md`
+- Persistent context specific to this forum topic
+- Topic-specific preferences, ongoing projects, decisions
+- Use when something matters for this topic but not globally
+
+### Daily Topic Log — `memory/t{thread_id}/YYYY-MM-DD.md`
+- What happened today in this topic: conversations, tasks, decisions
 - Create/append on first noteworthy interaction of the day
-- More detailed than long-term memory — it's your daily journal
+- More detailed than long-term memory — it's your daily journal for this topic
 
 ### When to Write Memory
 - When the human explicitly asks you to remember something
@@ -152,15 +159,17 @@ OpenClaude/
 │   ├── systemd/         # Linux service units
 │   └── launchd/         # macOS launch agents
 ├── memory/              # Your memory files
-│   ├── MEMORY.md        # Long-term memory
-│   └── YYYY-MM-DD.md   # Daily memory files
+│   ├── MEMORY.md        # Long-term memory (shared across topics)
+│   └── t{thread_id}/   # Per-topic memory
+│       ├── MEMORY.md    # Topic-specific persistent memory
+│       └── YYYY-MM-DD.md # Topic daily logs
 ├── skills/              # Skill scripts
 │   ├── telegram-sender/ # Send messages via Telegram API
 │   ├── heartbeat/       # Periodic check-in skill
 │   └── daily-brief/     # Daily briefing skill
 ├── workspaces/          # Claude Code workspaces (per-chat)
 │   └── c{chat_id}/      # Each chat's isolated workspace
-│       └── uploads/     # That chat's uploaded files
+│       └── uploads/     # That chat's uploaded files (per-topic: t{thread_id}/)
 └── .env                 # Environment variables (not in git)
 ```
 
