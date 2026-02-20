@@ -7,7 +7,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from . import helpers as h
+from bot.config import SCRIPT_DIR, is_authorized, get_thread_id
+from bot.logging_setup import logger
 
 COMMANDS = [
     ("stream", "Toggle live streaming of Claude's response"),
@@ -25,7 +26,7 @@ _SETTINGS_FILE = None  # Set lazily
 def _settings_file() -> Path:
     global _SETTINGS_FILE
     if _SETTINGS_FILE is None:
-        _SETTINGS_FILE = h.SCRIPT_DIR / ".chat-settings.json"
+        _SETTINGS_FILE = SCRIPT_DIR / ".chat-settings.json"
     return _SETTINGS_FILE
 
 
@@ -43,7 +44,7 @@ def _save_settings(settings: dict) -> None:
     try:
         _settings_file().write_text(json.dumps(settings, indent=2))
     except OSError as e:
-        h.logger.error("Failed to save chat settings: %s", e)
+        logger.error("Failed to save chat settings: %s", e)
 
 
 def _setting_key(chat_id: int, thread_id: int) -> str:
@@ -102,11 +103,11 @@ def _stream_text(is_on: bool) -> str:
 
 async def cmd_stream(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     is_on = get_streaming(chat_id, thread_id)
 
     await update.message.reply_text(
@@ -162,11 +163,11 @@ def _verbose_text(is_on: bool) -> str:
 
 async def cmd_verbose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     is_on = get_verbose(chat_id, thread_id)
 
     await update.message.reply_text(
@@ -221,11 +222,11 @@ def _respond_text(mode: str) -> str:
 
 async def cmd_respond(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
 
     if update.effective_chat.type == "private":
         await update.message.reply_text("Response mode only applies to group chats.")

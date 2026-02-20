@@ -161,7 +161,21 @@ When invoked via the Telegram bot, you have access to:
 
 ```
 OpenClaude/
-├── telegram-bot.py      # The Telegram bot
+├── bot/                 # Main bot package (python -m bot)
+│   ├── __main__.py      # Entry point
+│   ├── app.py           # Application builder, startup, shutdown
+│   ├── config.py        # Configuration, constants, authorization
+│   ├── logging_setup.py # Logger setup (infra, workspace loggers)
+│   ├── sessions.py      # Session persistence (load/save/clear)
+│   ├── streams.py       # Active stream tracking (crash recovery)
+│   ├── sdk_session.py   # SDKSession class, idle cleanup
+│   ├── workspaces.py    # Per-chat workspace creation, symlinks
+│   ├── permissions.py   # Security rules, env building, permission handler
+│   ├── claude.py        # Claude integration (streaming, SDK/subprocess)
+│   ├── renderer.py      # TelegramRenderer + message splitting
+│   ├── handlers.py      # Message/media handlers, batching, streaming UI
+│   └── transcribe.py    # Voice transcription bridge
+├── telegram-bot.py      # Backward-compatible entry point
 ├── transcribe.py        # Voice transcription module
 ├── CLAUDE.md            # This file (your instructions)
 ├── SOUL.md              # Your personality and values

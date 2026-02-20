@@ -8,7 +8,10 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from . import helpers as h
+from bot.config import is_authorized, get_thread_id
+from bot.renderer import split_message
+from bot.workspaces import ensure_workspace
+from bot.handlers import run_with_streaming
 
 # (command_name, description) — used by /start listing
 COMMANDS = [
@@ -22,7 +25,7 @@ COMMANDS = [
 
 def _get_memory_paths(chat_id: int, thread_id: int) -> dict[str, Path]:
     """Return paths to all memory files for a chat/thread."""
-    workspace = h.ensure_workspace(chat_id)
+    workspace = ensure_workspace(chat_id)
     mem_dir = workspace / "memory"
     return {
         "shared": mem_dir / "MEMORY.md",
@@ -34,11 +37,11 @@ def _get_memory_paths(chat_id: int, thread_id: int) -> dict[str, Path]:
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show contents of all memory files for this chat/thread."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     paths = _get_memory_paths(chat_id, thread_id)
 
     sections = []
@@ -58,7 +61,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = "\n\n".join(sections)
     tg_thread = thread_id or None
 
-    for chunk in h.split_message(text):
+    for chunk in split_message(text):
         try:
             await update.message.reply_text(
                 chunk, parse_mode=ParseMode.HTML, message_thread_id=tg_thread,
@@ -70,7 +73,7 @@ async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save a note to today's daily log."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     note = " ".join(context.args) if context.args else ""
@@ -79,7 +82,7 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     paths = _get_memory_paths(chat_id, thread_id)
     daily = paths["daily"]
     daily.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +102,7 @@ async def cmd_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save a note to long-term shared memory (MEMORY.md)."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     note = " ".join(context.args) if context.args else ""
@@ -108,7 +111,7 @@ async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     paths = _get_memory_paths(chat_id, thread_id)
     mem = paths["shared"]
     mem.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +131,7 @@ async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask Claude to intelligently remove something from memory files."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     what = " ".join(context.args) if context.args else ""
@@ -137,7 +140,7 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
 
     prompt = (
         f"[System command: /forget]\n"
@@ -148,17 +151,17 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Then confirm what you removed."
     )
 
-    await h._run_with_streaming(update, context, chat_id, thread_id, user.id, prompt)
+    await run_with_streaming(update, context, chat_id, thread_id, user.id, prompt)
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ask Claude to summarize the recent conversation."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
 
     prompt = (
         "[System command: /history]\n"
@@ -167,7 +170,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "and any pending items. Keep it brief — this is for quick reference."
     )
 
-    await h._run_with_streaming(update, context, chat_id, thread_id, user.id, prompt)
+    await run_with_streaming(update, context, chat_id, thread_id, user.id, prompt)
 
 
 def register(app: Application) -> None:

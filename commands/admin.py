@@ -7,7 +7,14 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from . import helpers as h
+from bot.config import (
+    ADMIN_USER_ID, ALLOWED_USERS, SCRIPT_DIR, WORKSPACES_DIR, LOGS_DIR,
+    is_authorized, get_claude_model, get_thread_id,
+)
+from bot.logging_setup import logger, infra_logger
+from bot.sessions import load_sessions
+from bot.streams import load_active_streams
+from bot.renderer import split_message
 
 COMMANDS = [
     ("sessions", "List all active sessions (admin)"),
@@ -18,20 +25,20 @@ COMMANDS = [
 
 
 def _require_admin(user_id: int) -> bool:
-    return h.ADMIN_USER_ID is not None and user_id == h.ADMIN_USER_ID
+    return ADMIN_USER_ID is not None and user_id == ADMIN_USER_ID
 
 
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List all active sessions across chats."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
     if not _require_admin(user.id):
         await update.message.reply_text("Admin only.")
         return
 
-    thread_id = h.get_thread_id(update)
-    sessions = h.load_sessions()
+    thread_id = get_thread_id(update)
+    sessions = load_sessions()
 
     if not sessions:
         await update.message.reply_text(
@@ -50,7 +57,7 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
     text = "\n".join(lines)
-    for chunk in h.split_message(text):
+    for chunk in split_message(text):
         try:
             await update.message.reply_text(
                 chunk, parse_mode=ParseMode.HTML, message_thread_id=thread_id or None,
@@ -62,14 +69,14 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Trigger a graceful bot restart via restart.sh."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
     if not _require_admin(user.id):
         await update.message.reply_text("Admin only.")
         return
 
-    thread_id = h.get_thread_id(update)
-    restart_script = h.SCRIPT_DIR / "bin" / "restart.sh"
+    thread_id = get_thread_id(update)
+    restart_script = SCRIPT_DIR / "bin" / "restart.sh"
 
     if not restart_script.exists():
         await update.message.reply_text(
@@ -80,11 +87,11 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(
         "Restarting bot...", message_thread_id=thread_id or None,
     )
-    h.infra_logger.info("Restart triggered via /restart by user %d", user.id)
+    infra_logger.info("Restart triggered via /restart by user %d", user.id)
 
     subprocess.Popen(
         ["bash", str(restart_script)],
-        cwd=str(h.SCRIPT_DIR),
+        cwd=str(SCRIPT_DIR),
         start_new_session=True,
     )
 
@@ -92,17 +99,16 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show recent infrastructure log entries."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
     if not _require_admin(user.id):
         await update.message.reply_text("Admin only.")
         return
 
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     arg = " ".join(context.args).strip() if context.args else ""
 
     if arg.startswith("c"):
-        # Workspace log: /logs c12345
         try:
             chat_id = int(arg[1:])
         except ValueError:
@@ -111,9 +117,9 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 message_thread_id=thread_id or None,
             )
             return
-        log_path = h.WORKSPACES_DIR / f"c{chat_id}" / "logs" / "activity.log"
+        log_path = WORKSPACES_DIR / f"c{chat_id}" / "logs" / "activity.log"
     else:
-        log_path = h.LOGS_DIR / "infra.log"
+        log_path = LOGS_DIR / "infra.log"
 
     if not log_path.exists():
         await update.message.reply_text(
@@ -130,7 +136,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<pre>{html.escape(chr(10).join(tail))}</pre>"
     )
 
-    for chunk in h.split_message(text):
+    for chunk in split_message(text):
         try:
             await update.message.reply_text(
                 chunk, parse_mode=ParseMode.HTML, message_thread_id=thread_id or None,
@@ -144,20 +150,20 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show usage statistics."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
     if not _require_admin(user.id):
         await update.message.reply_text("Admin only.")
         return
 
-    thread_id = h.get_thread_id(update)
-    sessions = h.load_sessions()
+    thread_id = get_thread_id(update)
+    sessions = load_sessions()
 
     workspace_count = 0
     total_upload_size = 0
     total_memory_size = 0
-    if h.WORKSPACES_DIR.exists():
-        for ws in h.WORKSPACES_DIR.iterdir():
+    if WORKSPACES_DIR.exists():
+        for ws in WORKSPACES_DIR.iterdir():
             if ws.is_dir() and ws.name.startswith("c"):
                 workspace_count += 1
                 uploads = ws / "uploads"
@@ -178,7 +184,7 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return f"{b / 1024:.0f}KB"
         return f"{b}B"
 
-    streams = h._load_active_streams()
+    streams = load_active_streams()
 
     lines = [
         "<b>Usage Statistics</b>",
@@ -188,8 +194,8 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<b>Workspaces:</b> {workspace_count}",
         f"<b>Uploads size:</b> {_fmt(total_upload_size)}",
         f"<b>Memory size:</b> {_fmt(total_memory_size)}",
-        f"<b>Model:</b> <code>{html.escape(h.get_claude_model() or 'default')}</code>",
-        f"<b>Allowed users:</b> {len(h.ALLOWED_USERS)}",
+        f"<b>Model:</b> <code>{html.escape(get_claude_model() or 'default')}</code>",
+        f"<b>Allowed users:</b> {len(ALLOWED_USERS)}",
     ]
 
     await update.message.reply_text(

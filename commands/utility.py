@@ -7,7 +7,10 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from . import helpers as h
+from bot.config import ADMIN_USER_ID, is_authorized, get_claude_model, set_claude_model, get_thread_id
+from bot.logging_setup import logger
+from bot.renderer import split_message
+from bot.workspaces import ensure_workspace
 
 COMMANDS = [
     ("model", "Show or switch the Claude model"),
@@ -20,29 +23,29 @@ COMMANDS = [
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current Claude model, or switch it."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
-    thread_id = h.get_thread_id(update)
+    thread_id = get_thread_id(update)
     new_model = " ".join(context.args).strip() if context.args else ""
 
     if new_model:
-        if h.ADMIN_USER_ID and user.id != h.ADMIN_USER_ID:
+        if ADMIN_USER_ID and user.id != ADMIN_USER_ID:
             await update.message.reply_text(
                 "Only admin can switch the model.",
                 message_thread_id=thread_id or None,
             )
             return
 
-        h.set_claude_model(new_model)
+        set_claude_model(new_model)
         await update.message.reply_text(
             f"Model switched to: <code>{html.escape(new_model)}</code>",
             parse_mode=ParseMode.HTML,
             message_thread_id=thread_id or None,
         )
-        h.logger.info("Model changed to %s by user %d", new_model, user.id)
+        logger.info("Model changed to %s by user %d", new_model, user.id)
     else:
-        current = h.get_claude_model() or "(default — not set)"
+        current = get_claude_model() or "(default — not set)"
         await update.message.reply_text(
             f"Current model: <code>{html.escape(current)}</code>\n"
             f"Usage: /model <code>model-name</code> to switch",
@@ -54,12 +57,12 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the bot's knowledge about the user (USER.md contents)."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
-    workspace = h.ensure_workspace(chat_id)
+    thread_id = get_thread_id(update)
+    workspace = ensure_workspace(chat_id)
     user_md = workspace / "USER.md"
 
     if user_md.exists():
@@ -85,17 +88,16 @@ async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List files in the workspace."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
-    workspace = h.ensure_workspace(chat_id)
+    thread_id = get_thread_id(update)
+    workspace = ensure_workspace(chat_id)
 
     lines = []
     for item in sorted(workspace.rglob("*")):
         rel = item.relative_to(workspace)
-        # Skip .claude directory contents (symlink to shared config)
         if str(rel).startswith(".claude"):
             continue
         depth = len(rel.parts)
@@ -122,7 +124,7 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append("... and more files")
         text = f"<b>Workspace files</b>:\n<pre>{html.escape(chr(10).join(lines))}</pre>"
 
-    for chunk in h.split_message(text):
+    for chunk in split_message(text):
         try:
             await update.message.reply_text(
                 chunk, parse_mode=ParseMode.HTML, message_thread_id=thread_id or None,
@@ -134,12 +136,12 @@ async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_clean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clean uploaded files from the workspace."""
     user = update.effective_user
-    if not h.is_authorized(user.id):
+    if not is_authorized(user.id):
         return
 
     chat_id = update.effective_chat.id
-    thread_id = h.get_thread_id(update)
-    workspace = h.ensure_workspace(chat_id)
+    thread_id = get_thread_id(update)
+    workspace = ensure_workspace(chat_id)
     uploads_dir = workspace / "uploads"
 
     if not uploads_dir.exists():
@@ -168,8 +170,8 @@ async def cmd_clean(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Cleaned {file_count} file(s) ({size_str}).",
         message_thread_id=thread_id or None,
     )
-    h.logger.info("User %d cleaned uploads for chat %d: %d files, %s",
-                   user.id, chat_id, file_count, size_str)
+    logger.info("User %d cleaned uploads for chat %d: %d files, %s",
+                 user.id, chat_id, file_count, size_str)
 
 
 def register(app: Application) -> None:
