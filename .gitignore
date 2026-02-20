@@ -34,6 +34,7 @@ workspaces/
 .ouroboros.pid
 .active-streams.json
 .restart-state.json
+.restart-messages.json
 bot.log
 logs/
 .last-log-cleanup

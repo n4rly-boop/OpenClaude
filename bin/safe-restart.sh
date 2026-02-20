@@ -43,6 +43,34 @@ get_short_hash() {
     git -C "$PROJECT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown"
 }
 
+edit_restart_messages() {
+    local text="$1"
+    local file="$PROJECT_DIR/.restart-messages.json"
+    [[ -f "$file" ]] || return 0
+
+    local token=""
+    if [[ -f "$PROJECT_DIR/.env" ]]; then
+        token=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$PROJECT_DIR/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")
+    fi
+    [[ -n "$token" ]] || return 0
+
+    python3 -c "
+import json, urllib.request
+msgs = json.load(open('$file'))
+for m in msgs:
+    data = json.dumps({'chat_id': m['chat_id'], 'message_id': m['message_id'], 'text': '$text'}).encode()
+    req = urllib.request.Request(
+        'https://api.telegram.org/bot$token/editMessageText',
+        data=data, headers={'Content-Type': 'application/json'})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+" 2>/dev/null || true
+
+    rm -f "$file"
+}
+
 sync_main() {
     log "Syncing with origin/main..."
     cd "$PROJECT_DIR"
@@ -164,4 +192,5 @@ $TEST_OUTPUT"
 done
 
 notify "[safe-restart] All $MAX_RETRIES attempts exhausted. Manual intervention needed."
+edit_restart_messages "❌ Restart failed"
 exit 1

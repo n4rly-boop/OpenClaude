@@ -1,6 +1,7 @@
 """Admin commands: /sessions, /restart, /logs, /usage."""
 
 import html
+import json
 import subprocess
 
 from telegram import Update
@@ -8,7 +9,8 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from bot.config import (
-    ADMIN_USER_ID, ALLOWED_USERS, SCRIPT_DIR, WORKSPACES_DIR, LOGS_DIR,
+    ADMIN_USER_ID, ALLOWED_USERS, RESTART_MESSAGES_FILE, SCRIPT_DIR,
+    WORKSPACES_DIR, LOGS_DIR,
     is_authorized, get_claude_model, get_thread_id,
 )
 from bot.logging_setup import logger, infra_logger
@@ -84,10 +86,26 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await update.message.reply_text(
+    sent = await update.message.reply_text(
         "Restarting bot...", message_thread_id=thread_id or None,
     )
     infra_logger.info("Restart triggered via /restart by user %d", user.id)
+
+    # Save message ID so post_init can edit it to "Restart complete"
+    entry = {
+        "chat_id": sent.chat_id,
+        "thread_id": thread_id or 0,
+        "message_id": sent.message_id,
+    }
+    # Merge with any existing entries (from notify-interrupted.sh)
+    existing = []
+    if RESTART_MESSAGES_FILE.exists():
+        try:
+            existing = json.loads(RESTART_MESSAGES_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    existing.append(entry)
+    RESTART_MESSAGES_FILE.write_text(json.dumps(existing))
 
     subprocess.Popen(
         ["bash", str(restart_script)],

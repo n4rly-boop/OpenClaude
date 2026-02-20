@@ -15,8 +15,8 @@ from telegram.ext import (
 )
 
 from bot.config import (
-    ALLOWED_USERS, ACTIVE_STREAMS_FILE, RESTART_STATE_FILE,
-    SESSION_FILE, TELEGRAM_BOT_TOKEN, WORKING_DIR,
+    ALLOWED_USERS, ACTIVE_STREAMS_FILE, RESTART_MESSAGES_FILE,
+    RESTART_STATE_FILE, SESSION_FILE, TELEGRAM_BOT_TOKEN, WORKING_DIR,
 )
 from bot.logging_setup import logger, infra_logger
 from bot.sessions import get_session_id
@@ -74,6 +74,27 @@ def main() -> None:
         if HAS_SDK:
             asyncio.create_task(cleanup_idle_sessions())
             logger.info("SDK idle session cleanup task started")
+
+        # Edit "Restarting..." messages to show success
+        if RESTART_MESSAGES_FILE.exists():
+            try:
+                msgs = json.loads(RESTART_MESSAGES_FILE.read_text())
+                for entry in msgs:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=entry["chat_id"],
+                            message_id=entry["message_id"],
+                            text="\u2705 Restart complete",
+                        )
+                    except Exception as e:
+                        infra_logger.warning(
+                            "Failed to edit restart message %s in chat %s: %s",
+                            entry.get("message_id"), entry.get("chat_id"), e,
+                        )
+            except (json.JSONDecodeError, OSError) as e:
+                infra_logger.warning("Failed to read restart messages file: %s", e)
+            finally:
+                RESTART_MESSAGES_FILE.unlink(missing_ok=True)
 
         # Collect interrupted chats from restart state and active streams
         interrupted: dict[str, dict] = {}

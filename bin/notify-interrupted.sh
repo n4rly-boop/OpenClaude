@@ -43,14 +43,41 @@ if [[ -z "$CHATS" ]]; then
     exit 0
 fi
 
-# Send notification to each chat
+# File to store sent message IDs for later editing
+RESTART_MESSAGES_FILE="$PROJECT_DIR/.restart-messages.json"
+
+# Send notification to each chat and save message IDs
+echo "[" > "$RESTART_MESSAGES_FILE"
+FIRST_ENTRY=true
+
 while read -r CHAT_ID THREAD_ID; do
     PAYLOAD="{\"chat_id\": $CHAT_ID, \"text\": \"$MESSAGE\"}"
     if [[ "$THREAD_ID" -ne 0 ]]; then
         PAYLOAD="{\"chat_id\": $CHAT_ID, \"text\": \"$MESSAGE\", \"message_thread_id\": $THREAD_ID}"
     fi
-    curl -s -X POST \
+    RESPONSE=$(curl -s -X POST \
         "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "$PAYLOAD" >/dev/null 2>&1 || true
+        -d "$PAYLOAD" 2>/dev/null) || true
+
+    # Parse message_id from response and save for later editing
+    MSG_ID=$(echo "$RESPONSE" | python3 -c "
+import json, sys
+try:
+    r = json.load(sys.stdin)
+    if r.get('ok'):
+        print(r['result']['message_id'])
+except Exception:
+    pass
+" 2>/dev/null) || true
+
+    if [[ -n "$MSG_ID" ]]; then
+        if [[ "$FIRST_ENTRY" != true ]]; then
+            echo "," >> "$RESTART_MESSAGES_FILE"
+        fi
+        FIRST_ENTRY=false
+        echo "{\"chat_id\": $CHAT_ID, \"thread_id\": $THREAD_ID, \"message_id\": $MSG_ID}" >> "$RESTART_MESSAGES_FILE"
+    fi
 done <<< "$CHATS"
+
+echo "]" >> "$RESTART_MESSAGES_FILE"

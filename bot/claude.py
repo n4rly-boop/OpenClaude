@@ -196,6 +196,14 @@ async def _stream_claude_sdk(message: str, chat_id: int, thread_id: int, user_id
                     yield {"type": "result", "text": result_text, "session_id": new_session_id}
 
         except Exception as e:
+            err_str = str(e)
+            # SIGTERM during restart — not a real error
+            if "exit code -15" in err_str or "exit code: -15" in err_str:
+                logger.info("SDK process killed by SIGTERM (likely bot restart)")
+                await sdk_session.disconnect()
+                sdk_sessions.pop(skey, None)
+                yield {"type": "silent"}
+                return
             logger.exception("SDK streaming error")
             await sdk_session.disconnect()
             sdk_sessions.pop(skey, None)
@@ -339,6 +347,8 @@ async def _stream_claude_subprocess(message: str, chat_id: int, thread_id: int, 
             if proc.returncode < 0:
                 sig = -proc.returncode
                 logger.info("Claude CLI killed by signal %d (likely bot restart)", sig)
+                if result_text is None:
+                    yield {"type": "silent"}
                 return
             stderr_data = await proc.stderr.read()
             error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"

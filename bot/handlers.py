@@ -367,6 +367,9 @@ async def run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE,
             elif etype == "error":
                 response_text = event.get("text", "An error occurred.")
 
+            elif etype == "silent":
+                response_text = ""
+
     # Clean up status message
     if status_msg:
         try:
@@ -376,6 +379,15 @@ async def run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     if response_text is None:
         response_text = "Claude processed the request but returned no text output."
+
+    if not response_text:
+        # Silent exit (e.g. bot restart killed the process) — nothing to send
+        if live_msg:
+            try:
+                await live_msg.delete()
+            except Exception:
+                pass
+        return
 
     if live_msg and streaming:
         try:

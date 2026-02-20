@@ -47,6 +47,9 @@ ACTIVE_STREAMS_FILE = SCRIPT_DIR / ".active-streams.json"
 # Restart state
 RESTART_STATE_FILE = SCRIPT_DIR / ".restart-state.json"
 
+# Restart notification messages (for editing after outcome)
+RESTART_MESSAGES_FILE = SCRIPT_DIR / ".restart-messages.json"
+
 # Minimum interval between Telegram message edits (seconds)
 STATUS_EDIT_INTERVAL = 1.5
 
