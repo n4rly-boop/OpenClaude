@@ -849,7 +849,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = update.effective_chat.id
     thread_id = get_thread_id(update)
-    clear_session(chat_id, thread_id, user.id)
+    session_uid = user.id if update.effective_chat.type == "private" else 0
+    clear_session(chat_id, thread_id, session_uid)
     await update.message.reply_text(
         "Session cleared. Starting fresh.",
         message_thread_id=thread_id or None,
@@ -866,9 +867,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id = update.effective_chat.id
     thread_id = get_thread_id(update)
-    session_id = get_session_id(chat_id, thread_id, user.id)
+    session_uid = user.id if update.effective_chat.type == "private" else 0
+    session_id = get_session_id(chat_id, thread_id, session_uid)
     sessions = load_sessions()
-    key = _session_key(chat_id, thread_id, user.id)
+    key = _session_key(chat_id, thread_id, session_uid)
     user_data = sessions.get(key, {})
 
     status_lines = [
@@ -900,6 +902,9 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
                               chat_id: int, thread_id: int, user_id: int,
                               claude_message: str) -> None:
     """Stream Claude output, show tool progress via an editable status message, then send final response."""
+    # In group chats, share a single session across all users so the
+    # conversation stays coherent.  Private chats keep per-user sessions.
+    session_user_id = user_id if update.effective_chat.type == "private" else 0
     tg_thread_id = thread_id or None
     status_msg = None         # The editable Telegram status message
     finished_lines: list[str] = []  # Lines with checkmarks for completed tools
@@ -938,8 +943,8 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
     response_text = None
     chat_working_dir = get_working_dir(chat_id)
 
-    async with _get_user_lock(user_id):
-        async for event in stream_claude(claude_message, chat_id, thread_id, user_id,
+    async with _get_user_lock(session_user_id):
+        async for event in stream_claude(claude_message, chat_id, thread_id, session_user_id,
                                          working_dir=chat_working_dir):
             etype = event.get("type")
 
