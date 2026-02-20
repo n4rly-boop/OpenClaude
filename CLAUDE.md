@@ -158,8 +158,9 @@ OpenClaude/
 │   ├── telegram-sender/ # Send messages via Telegram API
 │   ├── heartbeat/       # Periodic check-in skill
 │   └── daily-brief/     # Daily briefing skill
-├── workspaces/          # Claude Code workspaces
-│   └── uploads/         # Temporary file storage
+├── workspaces/          # Claude Code workspaces (per-chat)
+│   └── c{chat_id}/      # Each chat's isolated workspace
+│       └── uploads/     # That chat's uploaded files
 └── .env                 # Environment variables (not in git)
 ```
 

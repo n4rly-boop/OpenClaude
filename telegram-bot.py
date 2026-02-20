@@ -46,9 +46,6 @@ ALLOWED_USERS_RAW = os.getenv("ALLOWED_USERS", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")
 WORKING_DIR = os.getenv("WORKING_DIR") or str(SCRIPT_DIR)
 
-# Uploads directory for voice, files, photos
-UPLOADS_DIR = SCRIPT_DIR / "workspaces" / "uploads"
-
 # Workspaces directory for per-chat isolation
 WORKSPACES_DIR = SCRIPT_DIR / "workspaces"
 
@@ -1038,7 +1035,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user.id, user.username or user.first_name, getattr(voice, "duration", "?"),
     )
 
-    voice_dir = UPLOADS_DIR / "voice"
+    workspace = ensure_workspace(chat_id)
+    voice_dir = workspace / "uploads" / "voice"
     voice_dir.mkdir(parents=True, exist_ok=True)
     ogg_path = voice_dir / f"{voice.file_id}.ogg"
 
@@ -1084,8 +1082,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         user.id, doc.file_name, doc.file_size,
     )
 
+    workspace = ensure_workspace(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    dest_dir = UPLOADS_DIR / today
+    dest_dir = workspace / "uploads" / today
     dest_dir.mkdir(parents=True, exist_ok=True)
     # Sanitize filename: strip path components to prevent path traversal
     safe_name = Path(doc.file_name).name if doc.file_name else f"file_{doc.file_id}"
@@ -1095,7 +1094,55 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await file.download_to_drive(dest)
 
     caption = update.message.caption or ""
-    claude_msg = f"[File received: {dest.relative_to(SCRIPT_DIR)}]"
+    claude_msg = f"[File received: {dest.relative_to(workspace)}]"
+    if caption:
+        claude_msg += f' User says: "{caption}"'
+
+    await _run_with_streaming(update, context, chat_id, thread_id, user.id, claude_msg)
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming video messages — download and tell Claude the path."""
+    user = update.effective_user
+    if not is_authorized(user.id):
+        return
+
+    if not should_respond(update):
+        return
+
+    video = update.message.video
+    if not video:
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = get_thread_id(update)
+
+    logger.info(
+        "Video from %s (%d) in chat %d thread %d: %s (%s bytes)",
+        user.username or user.first_name,
+        user.id,
+        chat_id,
+        thread_id,
+        video.file_name or video.file_id,
+        video.file_size,
+    )
+    get_workspace_logger(chat_id).info(
+        "Video from user %d: %s (%s bytes)",
+        user.id, video.file_name or video.file_id, video.file_size,
+    )
+
+    workspace = ensure_workspace(chat_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    dest_dir = workspace / "uploads" / today
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = Path(video.file_name).name if video.file_name else f"video_{video.file_id}.mp4"
+    dest = dest_dir / safe_name
+
+    file = await context.bot.get_file(video.file_id)
+    await file.download_to_drive(dest)
+
+    caption = update.message.caption or ""
+    claude_msg = f"[Video received: {dest.relative_to(workspace)}]"
     if caption:
         claude_msg += f' User says: "{caption}"'
 
@@ -1135,8 +1182,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user.id, photo.width, photo.height,
     )
 
+    workspace = ensure_workspace(chat_id)
     today = datetime.now().strftime("%Y-%m-%d")
-    dest_dir = UPLOADS_DIR / today
+    dest_dir = workspace / "uploads" / today
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"photo_{photo.file_unique_id}.jpg"
 
@@ -1144,7 +1192,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await file.download_to_drive(dest)
 
     caption = update.message.caption or ""
-    claude_msg = f"[Photo received: {dest.relative_to(SCRIPT_DIR)}]"
+    claude_msg = f"[Photo received: {dest.relative_to(workspace)}]"
     if caption:
         claude_msg += f' User says: "{caption}"'
 
@@ -1274,6 +1322,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
