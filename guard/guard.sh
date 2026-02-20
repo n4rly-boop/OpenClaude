@@ -54,19 +54,34 @@ fi
 if [ "$OPENCLAUDE_IS_ADMIN" != "1" ]; then
     WORKSPACE="${OPENCLAUDE_WORKSPACE:-}"
 
-    # 7. Package management — non-admin cannot install/remove packages
+    # 7. Credential / env var snooping — block attempts to read host credentials
+    if echo "$CMD" | grep -qiE "\benv\b|\bprintenv\b|/proc/.*environ|\bset\b\s*$|\bexport\s+-p\b"; then
+        echo "BLOCKED: You are not allowed to inspect host environment variables." >&2
+        exit 2
+    fi
+    if echo "$CMD" | grep -qiE "\.config/(gh|git)/|\.claude/\.credentials|\.netrc|\.npmrc|\.pypirc|/etc/shadow|\.ssh/|\.aws/|\.kube/"; then
+        echo "BLOCKED: You are not allowed to access credential files." >&2
+        exit 2
+    fi
+    # Block reading the project-level .env (host credentials)
+    if echo "$CMD" | grep -qiE "cat.*/OpenClaude/\.env|head.*/OpenClaude/\.env|tail.*/OpenClaude/\.env|less.*/OpenClaude/\.env|more.*/OpenClaude/\.env"; then
+        echo "BLOCKED: You are not allowed to read the host .env file." >&2
+        exit 2
+    fi
+
+    # 9. Package management — non-admin cannot install/remove packages
     if echo "$CMD" | grep -qiE "\b(pip|pip3)\s+install|\b(npm|npx|yarn|pnpm)\s+(install|add|remove)|\b(apt|apt-get|dpkg|snap)\s+(install|remove|purge)|\bcargo\s+install|\bgem\s+install"; then
         echo "BLOCKED: You are not allowed to install or remove packages." >&2
         exit 2
     fi
 
-    # 8. Git operations — non-admin cannot run git commands that affect the repo
+    # 10. Git operations — non-admin cannot run git commands that affect the repo
     if echo "$CMD" | grep -qiE "\bgit\s+(push|pull|checkout|reset|rebase|merge|branch\s+-[dD]|remote|stash|cherry-pick|revert|commit|add|rm|clean)"; then
         echo "BLOCKED: You are not allowed to run git commands that modify the repository." >&2
         exit 2
     fi
 
-    # 9. chmod/chown on files outside workspace
+    # 11. chmod/chown on files outside workspace
     if [ -n "$WORKSPACE" ]; then
         if echo "$CMD" | grep -qiE "\b(chmod|chown)\b"; then
             # Extract paths from chmod/chown — block if any path is outside workspace
@@ -77,7 +92,7 @@ if [ "$OPENCLAUDE_IS_ADMIN" != "1" ]; then
             fi
         fi
 
-        # 10. rm -rf on paths outside workspace
+        # 12. rm -rf on paths outside workspace
         if echo "$CMD" | grep -qiE "\brm\s+.*-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+.*-[a-zA-Z]*f[a-zA-Z]*r"; then
             if ! echo "$CMD" | grep -qF "$WORKSPACE"; then
                 echo "BLOCKED: You can only delete files within your workspace." >&2

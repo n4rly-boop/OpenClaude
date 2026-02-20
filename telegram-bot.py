@@ -32,6 +32,8 @@ from telegram.ext import (
 )
 
 from transcribe import transcribe
+from commands.helpers import init as _init_commands
+from commands import register_all, ALL_COMMANDS
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -543,6 +545,71 @@ def split_message(text: str, max_length: int = TELEGRAM_MAX_LENGTH) -> list[str]
 
 
 # ---------------------------------------------------------------------------
+# Environment Building for Claude Subprocess
+# ---------------------------------------------------------------------------
+
+# Env vars safe to pass to non-admin users (no credentials leak)
+_SAFE_ENV_KEYS = {
+    "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "EDITOR", "VISUAL", "PAGER",
+    "PYTHONPATH", "NODE_PATH",
+}
+
+
+def _load_workspace_env(workspace_dir: str) -> dict[str, str]:
+    """Load env vars from a workspace's .env file, if it exists."""
+    env_file = Path(workspace_dir) / ".env"
+    if not env_file.exists():
+        return {}
+    result = {}
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key:
+                result[key] = value
+    return result
+
+
+def _build_env(is_admin: bool, cwd: str, thread_id: int) -> dict[str, str]:
+    """Build the environment dict for a Claude subprocess.
+
+    Admin: inherits full environment + workspace .env overrides.
+    Non-admin: gets only safe vars + workspace .env (no host credentials).
+    """
+    if is_admin:
+        env = os.environ.copy()
+    else:
+        # Start with only safe, non-credential env vars
+        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_KEYS}
+
+    # Remove internal vars that shouldn't leak
+    env.pop("CLAUDECODE", None)
+
+    # Ensure claude binary is on PATH
+    local_bin = str(Path.home() / ".local" / "bin")
+    if local_bin not in env.get("PATH", ""):
+        env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+
+    # Load workspace-specific .env (both admin and non-admin)
+    workspace_env = _load_workspace_env(cwd)
+    env.update(workspace_env)
+
+    # OpenClaude control vars (always set, after workspace env so they can't be overridden)
+    env["IS_SANDBOX"] = "1"
+    env["OPENCLAUDE_IS_ADMIN"] = "1" if is_admin else "0"
+    env["OPENCLAUDE_WORKSPACE"] = cwd
+    env["OPENCLAUDE_THREAD_ID"] = str(thread_id)
+
+    return env
+
+
+# ---------------------------------------------------------------------------
 # Claude CLI Integration — Streaming
 # ---------------------------------------------------------------------------
 
@@ -666,15 +733,7 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             session_id or "new",
         )
 
-        env = os.environ.copy()
-        env.pop("CLAUDECODE", None)
-        env["IS_SANDBOX"] = "1"
-        env["OPENCLAUDE_IS_ADMIN"] = "1" if is_admin else "0"
-        env["OPENCLAUDE_WORKSPACE"] = cwd
-        env["OPENCLAUDE_THREAD_ID"] = str(thread_id)
-        local_bin = str(Path.home() / ".local" / "bin")
-        if local_bin not in env.get("PATH", ""):
-            env["PATH"] = local_bin + ":" + env.get("PATH", "/usr/bin:/bin")
+        env = _build_env(is_admin, cwd, thread_id)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -849,12 +908,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    # Built-in commands
+    cmd_lines = [
+        "/new — Start a new conversation",
+        "/status — Show session info",
+    ]
+    # Dynamic commands from modules
+    for name, desc in ALL_COMMANDS:
+        cmd_lines.append(f"/{name} — {desc}")
+
     await update.message.reply_text(
         "OpenClaude is online.\n"
         "Send me a message and I'll route it to Claude.\n\n"
-        "Commands:\n"
-        "/new — Start a new conversation\n"
-        "/status — Show session info"
+        "Commands:\n" + "\n".join(cmd_lines)
     )
 
 
@@ -1261,6 +1327,18 @@ def main() -> None:
         logger.info("Bot username: @%s", BOT_USERNAME)
         infra_logger.info("Bot username: @%s", BOT_USERNAME)
 
+        # Register commands in Telegram's menu (refreshes the cached list)
+        from telegram import BotCommand
+        bot_commands = [
+            BotCommand("start", "Show welcome message"),
+            BotCommand("new", "Start a new conversation"),
+            BotCommand("status", "Show session info"),
+        ]
+        for name, desc in ALL_COMMANDS:
+            bot_commands.append(BotCommand(name, desc))
+        await bot.set_my_commands(bot_commands)
+        logger.info("Registered %d bot commands with Telegram", len(bot_commands))
+
         # Collect interrupted chats from two sources:
         # 1. .restart-state.json — snapshot from restart.sh (controlled restart)
         # 2. .active-streams.json — surviving entries from crash (finally blocks didn't run)
@@ -1343,10 +1421,14 @@ def main() -> None:
         .build()
     )
 
+    # Initialize command modules with references to our globals
+    _init_commands(globals())
+
     # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("status", cmd_status))
+    register_all(app)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
