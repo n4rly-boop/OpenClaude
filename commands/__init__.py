@@ -5,6 +5,7 @@ from telegram.ext import Application
 from .memory import register as register_memory
 from .utility import register as register_utility
 from .admin import register as register_admin
+from .config import register as register_config
 
 
 def register_all(app: Application) -> None:
@@ -12,6 +13,7 @@ def register_all(app: Application) -> None:
     register_memory(app)
     register_utility(app)
     register_admin(app)
+    register_config(app)
 
 
 # Collect every command's (name, description) for /start listing
@@ -22,10 +24,12 @@ def _collect() -> None:
     from .memory import COMMANDS as mem
     from .utility import COMMANDS as util
     from .admin import COMMANDS as adm
+    from .config import COMMANDS as cfg
     ALL_COMMANDS.clear()
     ALL_COMMANDS.extend(mem)
     ALL_COMMANDS.extend(util)
     ALL_COMMANDS.extend(adm)
+    ALL_COMMANDS.extend(cfg)
 
 
 _collect()

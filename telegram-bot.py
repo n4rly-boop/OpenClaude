@@ -34,6 +34,7 @@ from telegram.ext import (
 from transcribe import transcribe
 from commands.helpers import init as _init_commands
 from commands import register_all, ALL_COMMANDS
+from commands.config import get_streaming, get_verbose, get_respond_mode
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -372,8 +373,9 @@ BOT_USERNAME: str = ""
 def should_respond(update: Update) -> bool:
     """Decide whether the bot should respond to this message.
 
-    Always responds in private chats.  In groups, only responds when the bot
-    is @mentioned or the message is a reply to one of the bot's messages.
+    Always responds in private chats.  In groups, checks the per-thread
+    respond mode: 'all' responds to everything, 'mention' (default) only
+    responds when @mentioned or replied to.
     """
     chat = update.effective_chat
     if chat.type == "private":
@@ -383,7 +385,14 @@ def should_respond(update: Update) -> bool:
     if not msg:
         return False
 
-    # Respond if bot is @mentioned
+    # Check per-thread respond mode
+    thread_id = get_thread_id(update)
+    mode = get_respond_mode(chat.id, thread_id)
+
+    if mode == "all":
+        return True
+
+    # Default 'mention' mode: respond if bot is @mentioned
     if msg.entities:
         for entity in msg.entities:
             if entity.type == "mention":
@@ -668,12 +677,13 @@ def _finished_line(active_line: str) -> str:
 
 
 async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int,
-                        working_dir: str | None = None):
+                        working_dir: str | None = None, verbose: bool = False):
     """Stream Claude CLI output and yield events as they arrive.
 
     Yields dicts with keys:
       - {"type": "tool_use", "status": "📄 Reading file..."}
       - {"type": "tool_result"}
+      - {"type": "partial", "text": "..."} (only when verbose=True)
       - {"type": "result", "text": "...", "session_id": "..."}
       - {"type": "error", "text": "..."}
     """
@@ -720,6 +730,9 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
             "--dangerously-skip-permissions",
             "--allowedTools", ALL_TOOLS,
         ]
+
+        if verbose:
+            cmd.append("--include-partial-messages")
 
         if session_id:
             cmd.extend(["--resume", session_id])
@@ -791,9 +804,16 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
                         ws_log.info("Tool: %s — %s", tool_name, _summarize_input(tool_input))
                         status = format_tool_status(tool_name, tool_input)
                         yield {"type": "tool_use", "status": status}
-
             elif event_type == "tool_result":
                 yield {"type": "tool_result"}
+
+            elif event_type == "stream_event" and verbose:
+                # Partial text streaming: {"type":"stream_event","event":{"delta":{"type":"text_delta","text":"..."}}}
+                delta = event.get("event", {}).get("delta", {})
+                if delta.get("type") == "text_delta":
+                    chunk = delta.get("text", "")
+                    if chunk:
+                        yield {"type": "partial", "text": chunk}
 
             elif event_type == "result":
                 result_text = event.get("result", "")
@@ -989,10 +1009,18 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
     # conversation stays coherent.  Private chats keep per-user sessions.
     session_user_id = user_id if update.effective_chat.type == "private" else 0
     tg_thread_id = thread_id or None
+    streaming = get_streaming(chat_id, thread_id)
+    show_tools = get_verbose(chat_id, thread_id)
     status_msg = None         # The editable Telegram status message
     finished_lines: list[str] = []  # Lines with checkmarks for completed tools
     current_active: str = ""  # The currently-active tool line
     last_edit_time: float = 0
+
+    # Verbose mode: live response message
+    live_msg = None           # Separate message for live text
+    live_text = ""            # Accumulated partial text
+    last_live_edit: float = 0
+    LIVE_EDIT_INTERVAL = 2.0  # Telegram rate limit: ~20 edits/min
 
     async def _update_status(new_active: str = "") -> None:
         """Edit the status message with current tool progress."""
@@ -1023,25 +1051,61 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Silently ignore edit failures (e.g., message unchanged)
             pass
 
+    async def _update_live(text: str) -> None:
+        """Create or edit the live response message."""
+        nonlocal live_msg, last_live_edit
+
+        now = asyncio.get_event_loop().time()
+        if live_msg and (now - last_live_edit) < LIVE_EDIT_INTERVAL:
+            return
+
+        # Truncate for Telegram limit, add typing indicator
+        display = text[:TELEGRAM_MAX_LENGTH - 20] + " \u270d\ufe0f" if text else ""
+        if not display:
+            return
+
+        try:
+            if live_msg is None:
+                live_msg = await update.message.reply_text(
+                    display,
+                    message_thread_id=tg_thread_id,
+                )
+            else:
+                await live_msg.edit_text(display)
+            last_live_edit = asyncio.get_event_loop().time()
+        except Exception:
+            pass
+
     response_text = None
     chat_working_dir = get_working_dir(chat_id)
+    in_tool = False  # Track whether we're inside a tool call
 
     async with _get_user_lock(session_user_id):
         async for event in stream_claude(claude_message, chat_id, thread_id, session_user_id,
-                                         working_dir=chat_working_dir):
+                                         working_dir=chat_working_dir, verbose=streaming):
             etype = event.get("type")
 
             if etype == "tool_use":
-                # Mark previous active tool as finished
-                if current_active:
-                    finished_lines.append(_finished_line(current_active))
-                await _update_status(event["status"])
+                in_tool = True
+                live_text = ""  # Reset live text when entering a tool call
+                if show_tools:
+                    # Mark previous active tool as finished
+                    if current_active:
+                        finished_lines.append(_finished_line(current_active))
+                    await _update_status(event["status"])
 
             elif etype == "tool_result":
-                # Mark current tool as finished
-                if current_active:
-                    finished_lines.append(_finished_line(current_active))
-                    await _update_status("")
+                in_tool = False
+                if show_tools:
+                    # Mark current tool as finished
+                    if current_active:
+                        finished_lines.append(_finished_line(current_active))
+                        await _update_status("")
+
+            elif etype == "partial":
+                if not in_tool:
+                    live_text += event["text"]
+                    await _update_live(live_text)
 
             elif etype == "result":
                 response_text = event.get("text", "")
@@ -1056,10 +1120,33 @@ async def _run_with_streaming(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
-    # Send final response
+    # In streaming mode, edit the live message with the final rendered response
     if response_text is None:
         response_text = "Claude processed the request but returned no text output."
-    await send_rendered(update, response_text, context)
+
+    if live_msg and streaming:
+        # Replace the live message with the final rendered text
+        try:
+            rendered = renderer.render(response_text)
+            if len(rendered) <= TELEGRAM_MAX_LENGTH:
+                await live_msg.edit_text(
+                    rendered,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            else:
+                # Too long for one message — delete live msg, send split
+                await live_msg.delete()
+                await send_rendered(update, response_text, context)
+        except Exception:
+            # Fallback: delete live msg, send fresh
+            try:
+                await live_msg.delete()
+            except Exception:
+                pass
+            await send_rendered(update, response_text, context)
+    else:
+        await send_rendered(update, response_text, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
