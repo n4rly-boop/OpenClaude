@@ -22,8 +22,6 @@ SyslogIdentifier=openclaude
 
 # Security hardening
 NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=/path/to/OpenClaude %h/.openclaude-sessions.json %h/.claude /tmp
 
 [Install]
 WantedBy=multi-user.target

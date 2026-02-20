@@ -69,19 +69,7 @@ if [ "$OPENCLAUDE_IS_ADMIN" != "1" ]; then
         exit 2
     fi
 
-    # 9. Package management — non-admin cannot install/remove packages
-    if echo "$CMD" | grep -qiE "\b(pip|pip3)\s+install|\b(npm|npx|yarn|pnpm)\s+(install|add|remove)|\b(apt|apt-get|dpkg|snap)\s+(install|remove|purge)|\bcargo\s+install|\bgem\s+install"; then
-        echo "BLOCKED: You are not allowed to install or remove packages." >&2
-        exit 2
-    fi
-
-    # 10. Git operations — non-admin cannot run git commands that affect the repo
-    if echo "$CMD" | grep -qiE "\bgit\s+(push|pull|checkout|reset|rebase|merge|branch\s+-[dD]|remote|stash|cherry-pick|revert|commit|add|rm|clean)"; then
-        echo "BLOCKED: You are not allowed to run git commands that modify the repository." >&2
-        exit 2
-    fi
-
-    # 11. chmod/chown on files outside workspace
+    # 9. chmod/chown on files outside workspace
     if [ -n "$WORKSPACE" ]; then
         if echo "$CMD" | grep -qiE "\b(chmod|chown)\b"; then
             # Extract paths from chmod/chown — block if any path is outside workspace

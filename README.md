@@ -175,14 +175,44 @@ DEEPGRAM_API_KEY=your-deepgram-key
 
 Send a document or photo on Telegram and the bot will download it to `workspaces/uploads/YYYY-MM-DD/` and tell Claude the file path. Claude can then read, analyze, or process the file using its tools. Add a caption to your file to give Claude context about what you want done with it.
 
-## Security
+## Security & Permissions
 
-- **User authorization** -- only users listed in `ALLOWED_USERS` can interact with the bot
-- **Guard hooks** -- `guard/guard.sh` blocks dangerous Bash commands (service management, SSH, firewall, PAM) before they execute. `guard/guard-write.sh` blocks writes to protected system files.
-- **Protected files** -- SSH config, authorized_keys, firewall rules, PAM/NSS, and the guard scripts themselves are all write-protected
-- **Environment isolation** -- the `.env` file (containing tokens) is gitignored
-- **Safety rules** -- Claude follows safety rules defined in `CLAUDE.md` (ask before external actions)
-- Session data is stored locally at `~/.openclaude-sessions.json`
+Only users listed in `ALLOWED_USERS` can interact with the bot. The first user in the list is the **admin**.
+
+### What everyone can do
+
+- Read files, search the codebase, browse the web
+- Run shell commands (`ls`, `curl`, `python3`, etc.)
+- Install packages (`apt`, `pip`, `npm`, `cargo`, etc.)
+- Use `git` and `gh` CLI (with their own credentials)
+- Use `yt-dlp`, `ffmpeg`, and other installed tools
+- Write to memory files
+
+### What everyone is blocked from (enforced by guard hooks)
+
+| Blocked action | Why |
+|---|---|
+| `systemctl`, `service`, `kill`, `pkill`, `killall` | Prevents killing the bot or other services |
+| Modifying SSH config, `authorized_keys`, `/etc/ssh` | Prevents SSH lockout |
+| `iptables`, `ufw`, `nftables` | Prevents firewall lockout |
+| Bringing down network interfaces | Prevents network lockout |
+| Modifying PAM / NSS config | Prevents auth lockout |
+| Modifying the `root` user account | Prevents admin lockout |
+| Writing to guard scripts or `.claude/settings.json` | Prevents disabling security |
+
+### Additional non-admin restrictions
+
+| Blocked action | Why |
+|---|---|
+| Reading host env vars (`env`, `printenv`, `/proc/*/environ`) | Prevents credential leaks |
+| Reading credential files (`.env`, `.ssh/`, `.aws/`, `.npmrc`, etc.) | Prevents credential leaks |
+| `chmod`/`chown` outside their workspace | Workspace isolation |
+| `rm -rf` outside their workspace | Workspace isolation |
+| Writing/editing files outside their workspace | Workspace isolation |
+
+### Per-user environments
+
+Each user gets an isolated workspace at `workspaces/c{chat_id}/`. Users can have their own `.env` file in their workspace to set credentials (e.g. `GH_TOKEN` for their own GitHub account). Admin inherits the full host environment; non-admin users only get safe system vars plus their workspace `.env`.
 
 ## License
 
