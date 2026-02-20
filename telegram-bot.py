@@ -1006,7 +1006,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 # Batch window: messages arriving within this many seconds are combined
-BATCH_WINDOW = 0.5
+BATCH_WINDOW = 1.5
 
 # Per-session batch state
 _batch_buffers: dict[str, list[str]] = {}
