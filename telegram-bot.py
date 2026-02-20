@@ -298,11 +298,9 @@ def ensure_workspace(chat_id: int) -> Path:
     if workspace.exists():
         # Ensure symlinks are up to date (e.g. new shared files added)
         _sync_workspace_links(workspace)
-        # Refresh BOOTSTRAP.md so it's present for new sessions
-        base = Path(WORKING_DIR)
-        bootstrap = base / _BOOTSTRAP_FILE
-        if bootstrap.exists():
-            shutil.copy2(bootstrap, workspace / _BOOTSTRAP_FILE)
+        # Don't re-copy BOOTSTRAP.md — the agent deletes it after
+        # completing the first-run ritual.  Re-copying would force
+        # every session to re-run bootstrap.
         return workspace
 
     workspace.mkdir(parents=True, exist_ok=True)
@@ -565,6 +563,11 @@ def format_tool_status(tool_name: str, tool_input: dict) -> str:
         pattern = tool_input.get("pattern", "")
         return f'\U0001f50d Searching for "{pattern}"...'
     if tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        # Show the command itself (truncated), with description as fallback
+        if cmd:
+            short_cmd = cmd[:60] + "…" if len(cmd) > 60 else cmd
+            return f"\u2699\ufe0f `{short_cmd}`"
         desc = tool_input.get("description", "")
         if desc:
             return f"\u2699\ufe0f {desc}"
