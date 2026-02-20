@@ -7,20 +7,39 @@ Built in the spirit of [OpenClaw](https://github.com/nicholasgasior/OpenClaw) --
 ## How It Works
 
 ```
-You (Telegram) --> telegram-bot.py --> claude CLI --> Response --> You (Telegram)
+You (Telegram) --> bot/ package --> Claude Code SDK --> Response --> You (Telegram)
 ```
 
 1. You send a message on Telegram
-2. The bot calls the Claude CLI with your message
+2. The bot connects to Claude via the Claude Code SDK (with subprocess fallback)
 3. Claude runs with full tool access (read files, search web, execute code, etc.)
-4. The response is converted from markdown to Telegram HTML and sent back
+4. Tool progress is shown live, then the response is converted from markdown to Telegram HTML
 5. Session IDs are saved so conversations persist across messages
 
 ## Project Structure
 
 ```
 OpenClaude/
-├── telegram-bot.py              # Main bot script
+├── bot/                         # Main bot package (python -m bot)
+│   ├── __main__.py              # Entry point
+│   ├── app.py                   # Application builder, startup, shutdown
+│   ├── config.py                # Configuration, constants, authorization
+│   ├── logging_setup.py         # Logger setup (infra, workspace loggers)
+│   ├── sessions.py              # Session persistence (load/save/clear)
+│   ├── streams.py               # Active stream tracking (crash recovery)
+│   ├── sdk_session.py           # SDK session lifecycle management
+│   ├── workspaces.py            # Per-chat workspace creation, symlinks
+│   ├── permissions.py           # Security rules, env building, permission handler
+│   ├── claude.py                # Claude integration (streaming, SDK/subprocess)
+│   ├── renderer.py              # Markdown to Telegram HTML + message splitting
+│   ├── handlers.py              # Message/media handlers, batching, streaming UI
+│   └── transcribe.py            # Voice transcription bridge
+├── commands/                    # Slash command modules
+│   ├── admin.py                 # /sessions, /restart, /logs, /usage
+│   ├── config.py                # /stream, /verbose, /respond
+│   ├── memory.py                # /memory, /save, /remember, /forget, /history
+│   └── utility.py               # /model, /whoami, /files, /clean
+├── telegram-bot.py              # Backward-compatible entry point
 ├── transcribe.py                # Voice transcription (Deepgram)
 ├── bin/                         # Operational scripts
 │   ├── start.sh                 # Start the bot (systemd or nohup)
@@ -149,6 +168,22 @@ Configure the check interval via `OUROBOROS_INTERVAL` (default: 30 seconds).
 | `/start` | Show welcome message |
 | `/new` | Clear session, start a fresh conversation |
 | `/status` | Show your user ID, session info, and bot config |
+| `/memory` | Show current memory contents |
+| `/save` | Save a note to today's daily log |
+| `/remember` | Save a note to long-term memory |
+| `/forget` | Ask Claude to remove something from memory |
+| `/history` | Summarize recent conversation |
+| `/model` | Show or switch the Claude model |
+| `/whoami` | Show what the bot knows about you |
+| `/files` | List files in your workspace |
+| `/clean` | Clean uploaded files |
+| `/stream` | Toggle live streaming of Claude's response |
+| `/verbose` | Toggle tool usage display |
+| `/respond` | Set group response mode (mention/all) |
+| `/sessions` | List all active sessions (admin) |
+| `/restart` | Graceful bot restart (admin) |
+| `/logs` | Show recent infrastructure logs (admin) |
+| `/usage` | Show usage statistics (admin) |
 
 ## Features
 
