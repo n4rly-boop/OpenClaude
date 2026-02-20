@@ -732,6 +732,11 @@ async def stream_claude(message: str, chat_id: int, thread_id: int, user_id: int
         await proc.wait()
 
         if proc.returncode != 0:
+            # Negative return code = killed by signal (e.g. -15 = SIGTERM during restart)
+            if proc.returncode < 0:
+                sig = -proc.returncode
+                logger.info("Claude CLI killed by signal %d (likely bot restart)", sig)
+                return
             stderr_data = await proc.stderr.read()
             error_msg = stderr_data.decode().strip() if stderr_data else "Unknown error"
             logger.error("Claude CLI error (rc=%d): %s", proc.returncode, error_msg)
