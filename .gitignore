@@ -41,6 +41,9 @@ logs/
 # Heartbeat state
 heartbeat-state.json
 
+# Backups (rollback state)
+backups/
+
 # OS
 .DS_Store
 Thumbs.db

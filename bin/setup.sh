@@ -138,6 +138,41 @@ echo ""
 echo "Dependencies installed."
 echo ""
 
+# ── Dev branch setup ─────────────────────────────────────────────────
+
+echo "Setting up git branches for safe deployment..."
+cd "$PROJECT_DIR"
+
+if git rev-parse --is-inside-work-tree &>/dev/null; then
+    # Create dev branch if it doesn't exist
+    if ! git rev-parse --verify dev &>/dev/null; then
+        echo "  Creating 'dev' branch from 'main'..."
+        git branch dev main 2>/dev/null || git branch dev HEAD
+    else
+        echo "  'dev' branch already exists."
+    fi
+
+    # Switch to dev
+    git checkout dev 2>/dev/null || echo "  (could not switch to dev — you may have uncommitted changes)"
+
+    # Seed known-good commit
+    mkdir -p "$PROJECT_DIR/backups"
+    KNOWN_GOOD="$PROJECT_DIR/backups/known-good-commit"
+    if [[ ! -f "$KNOWN_GOOD" ]]; then
+        git rev-parse HEAD > "$KNOWN_GOOD"
+        echo "  Seeded known-good commit: $(git rev-parse --short HEAD)"
+    else
+        echo "  Known-good commit already set: $(cat "$KNOWN_GOOD" | head -c 7)"
+    fi
+
+    echo ""
+    echo "  Workflow: the agent works on 'dev'. 'main' stays stable."
+    echo "  safe-restart.sh merges main→dev, runs tests, and rolls back on failure."
+else
+    echo "  Not a git repository — skipping branch setup."
+fi
+echo ""
+
 # ── Make scripts executable ──────────────────────────────────────────
 
 echo "Making scripts executable..."

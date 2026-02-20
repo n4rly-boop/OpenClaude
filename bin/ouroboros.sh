@@ -22,12 +22,10 @@ while true; do
         "$SCRIPT_DIR/notify-interrupted.sh" "$PROJECT_DIR/.active-streams.json" \
             "Something went wrong — restarting..." 2>/dev/null || true
 
-        systemctl --user start "$SERVICE"
-        sleep 5
-        if systemctl --user is-active "$SERVICE" &>/dev/null; then
+        if "$SCRIPT_DIR/safe-restart.sh"; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] $SERVICE revived successfully"
         else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] $SERVICE failed to start!" >&2
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [ouroboros] safe-restart.sh failed!" >&2
         fi
     fi
 
