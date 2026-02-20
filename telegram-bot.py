@@ -162,16 +162,32 @@ def load_sessions() -> dict:
 
 
 def save_sessions(sessions: dict) -> None:
-    """Persist session mapping to disk (atomic write)."""
+    """Persist session mapping to disk (atomic write with fallback)."""
+    data = json.dumps(sessions, indent=2)
+    tmp_path = None
     try:
         fd, tmp_path = tempfile.mkstemp(
             dir=SESSION_FILE.parent, suffix=".tmp"
         )
         with os.fdopen(fd, "w") as f:
-            json.dump(sessions, f, indent=2)
+            f.write(data)
         os.replace(tmp_path, SESSION_FILE)
-    except OSError as e:
-        logger.error("Failed to save sessions: %s", e)
+        tmp_path = None  # replaced successfully
+    except OSError:
+        # Atomic replace failed (e.g. "Device or resource busy") —
+        # fall back to direct write which is less safe but preserves
+        # session continuity.
+        try:
+            SESSION_FILE.write_text(data)
+            logger.warning("save_sessions: atomic replace failed, used direct write")
+        except OSError as e2:
+            logger.error("Failed to save sessions: %s", e2)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _session_key(chat_id: int, thread_id: int, user_id: int) -> str:
