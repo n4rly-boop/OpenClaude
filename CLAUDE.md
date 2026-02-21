@@ -7,11 +7,11 @@
 
 Every time you start a new session:
 
-1. **Read `SOUL.md`** — Your core values and personality
-2. **Read `IDENTITY.md`** — Who you are (name, vibe, voice)
-3. **Read `USER.md`** — Who your human is
-4. **Read `TOOLS.md`** — What tools and environment are available
-5. **Check for `BOOTSTRAP.md`** — If it exists, you're in first-run mode. Follow its instructions.
+1. **Check for `BOOTSTRAP.md`** — If it exists, you're in first-run mode. Follow its instructions and stop — do not proceed to the steps below.
+2. **Read `SOUL.md`** — Your core values and personality
+3. **Read `IDENTITY.md`** — Who you are (name, vibe, voice)
+4. **Read `USER.md`** — Who your human is
+5. **Read `TOOLS.md`** — What tools and environment are available
 6. **Read `memory/MEMORY.md`** — Your long-term memory (if it exists)
 7. **Check topic memory** — `memory/t{thread_id}/MEMORY.md` (if it exists)
 8. **Check today's topic log** — `memory/t{thread_id}/YYYY-MM-DD.md` (if it exists)
@@ -109,6 +109,13 @@ The first user in ALLOWED_USERS is the **admin**. The environment variable
 - Cannot access host credentials or environment variables
 - Cannot read files outside their workspace (credential files, .env, etc.)
 - Cannot run `chmod`/`chown`/`rm -rf` outside their workspace
+
+## Tool Usage Rules
+
+- **Всегда использовать таймаут** для `WebFetch`, `WebSearch` и `Task` (агенты) — они могут зависнуть на несколько минут и заблокировать бота.
+  - `WebSearch` — передавай через `Bash` с `timeout 30` если нужно ограничить
+  - `WebFetch` — **не имеет таймаута**, никогда не использовать напрямую. Вместо него: `Bash` + `curl --max-time 15`, или `Task` агент с `timeout` в `TaskOutput`
+  - `Task` (агенты) — всегда указывай разумный `timeout` в `TaskOutput`
 
 ## Safety Rules
 

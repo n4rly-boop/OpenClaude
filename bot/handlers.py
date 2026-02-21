@@ -80,6 +80,32 @@ def strip_bot_mention(text: str) -> str:
     return text
 
 
+def get_reply_prefix(update: Update) -> str:
+    """If the user is replying to a message, return a prefix with the quoted text."""
+    reply = update.message.reply_to_message if update.message else None
+    if not reply:
+        return ""
+
+    # Determine who sent the replied-to message
+    from_user = reply.from_user
+    if from_user:
+        if BOT_USERNAME and from_user.username and from_user.username.lower() == BOT_USERNAME.lower():
+            sender = "you (the assistant)"
+        else:
+            sender = from_user.first_name or from_user.username or str(from_user.id)
+    else:
+        sender = "unknown"
+
+    quoted = reply.text or reply.caption or ""
+    if not quoted:
+        return f'[User is replying to a message from {sender} (no text content)]\n'
+
+    if len(quoted) > 500:
+        quoted = quoted[:500] + "…"
+
+    return f'[User is replying to this message from {sender}:\n"{quoted}"]\n'
+
+
 # ---------------------------------------------------------------------------
 # Message Sending
 # ---------------------------------------------------------------------------
@@ -445,7 +471,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user.id, user.username or user.first_name, len(message_text),
     )
 
-    await queue_message(update, context, chat_id, thread_id, user.id, message_text)
+    claude_msg = get_reply_prefix(update) + message_text
+    await queue_message(update, context, chat_id, thread_id, user.id, claude_msg)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -486,7 +513,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     text = await transcribe(ogg_path)
     caption = update.message.caption or ""
-    claude_msg = f'[Voice message transcription]: "{text}"'
+    claude_msg = get_reply_prefix(update) + f'[Voice message transcription]: "{text}"'
     if caption:
         claude_msg += f' User also wrote: "{caption}"'
 
