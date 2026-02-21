@@ -27,6 +27,18 @@ You have access to these tools when invoked via the Telegram bot:
 - **Purpose:** Send messages and files to Telegram chats directly
 - **Usage:** `send.sh --text "message" --chat CHAT_ID` or `send.sh --file /path/to/file --chat CHAT_ID`
 
+### ssh-vps
+- **Location:** `skills/ssh-vps/run.sh`
+- **Purpose:** Run commands on the VPS over SSH via sshpass
+- **Usage:** `./skills/ssh-vps/run.sh "command"`
+- **Examples:**
+  ```bash
+  ./skills/ssh-vps/run.sh "df -h"
+  ./skills/ssh-vps/run.sh "uptime && free -h"
+  ./skills/ssh-vps/run.sh "cat /var/log/syslog | tail -50"
+  ```
+- **Credentials:** Read from `workspaces/c695690599/.env` (`VPS_HOST`, `VPS_PORT`, `VPS_USER`, `VPS_PASSWORD`)
+
 ### daily-brief (planned)
 - **Location:** `skills/daily-brief/`
 - **Purpose:** Generate and deliver daily briefings
@@ -38,7 +50,10 @@ You have access to these tools when invoked via the Telegram bot:
 - **Working Directory:** _Set via WORKING_DIR in .env or defaults to project root_
 
 ### SSH Hosts
-_None configured yet_
+
+| Alias | Host | Port | User | Credentials |
+|-------|------|------|------|-------------|
+| VPS | 89.58.3.206 | 22 | root | `workspaces/c695690599/.env` → `VPS_*` |
 
 ### API Keys & Services
 _None configured yet — document available APIs here as they're added_
