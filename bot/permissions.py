@@ -123,7 +123,12 @@ def make_permission_handler(is_admin: bool, workspace: str):
                         tokens = shlex.split(cmd)
                         for token in tokens:
                             resolved = os.path.realpath(token)
-                            if resolved.startswith("/") and not resolved.startswith(workspace + "/") and resolved != workspace:
+                            outside = (
+                                resolved.startswith("/")
+                                and not resolved.startswith(workspace + "/")
+                                and resolved != workspace
+                            )
+                            if outside:
                                 return PermissionResultDeny(
                                     message=(
                                         "BLOCKED: You can only change"
@@ -144,7 +149,12 @@ def make_permission_handler(is_admin: bool, workspace: str):
                         tokens = shlex.split(cmd)
                         for token in tokens:
                             resolved = os.path.realpath(token)
-                            if resolved.startswith("/") and not resolved.startswith(workspace + "/") and resolved != workspace:
+                            outside = (
+                                resolved.startswith("/")
+                                and not resolved.startswith(workspace + "/")
+                                and resolved != workspace
+                            )
+                            if outside:
                                 return PermissionResultDeny(
                                     message=(
                                         "BLOCKED: You can only delete"

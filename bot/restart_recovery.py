@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ from typing import Any
 from bot.config import ACTIVE_STREAMS_FILE, RESTART_MESSAGES_FILE, RESTART_STATE_FILE
 from bot.logging_setup import infra_logger
 from bot.prompts import _get_current_commit, _read_restart_commit, _read_restart_context
-from bot.renderer import TelegramRenderer, split_message
+from bot.renderer import TelegramRenderer
 from bot.rollback import mark_consumed as mark_rollback_consumed
 from bot.sessions import get_session_id, session_key
 from bot.workspaces import get_working_dir

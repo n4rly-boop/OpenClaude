@@ -79,10 +79,14 @@ async def stream_sdk(
         except Exception as e:
             if attempt == max_retries:
                 logger.exception("SDK connect failed after %d retries: %s", max_retries, e)
-                yield {"type": "error", "text": f"Failed to connect to Claude after {max_retries} retries: {e}"}
+                msg = f"Failed to connect to Claude after {max_retries} retries: {e}"
+                yield {"type": "error", "text": msg}
                 return
             delay = 2 ** attempt  # 1s, 2s, 4s
-            logger.warning("SDK connect attempt %d failed: %s — retrying in %ds", attempt + 1, e, delay)
+            logger.warning(
+                "SDK connect attempt %d failed: %s — retrying in %ds",
+                attempt + 1, e, delay,
+            )
             with contextlib.suppress(Exception):
                 await sdk_session.disconnect()
             sdk_session = SDKSession()

@@ -9,14 +9,13 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from bot.auth import authorized
 from bot.config import (
     ALL_TOOLS,
     get_thread_id,
     is_authorized,
 )
 from bot.process import kill_active_proc
-from bot.sessions import clear_session, get_context_pct, get_session_id, load_sessions, session_key
+from bot.sessions import clear_session, get_session_id, load_sessions, session_key
 from bot.workspaces import get_working_dir
 
 logger = logging.getLogger(__name__)
@@ -139,7 +138,7 @@ async def _force_stop_session(skey: str, chat_id: int, thread_id: int, session_u
         task.cancel()
         try:
             await asyncio.wait_for(task, timeout=5)
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             task.cancel()  # re-cancel in case the first didn't propagate in time
         except (asyncio.CancelledError, Exception):
             pass

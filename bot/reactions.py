@@ -1,6 +1,5 @@
 """Reaction directives — detect [react:emoji] in Claude output and apply via Telegram API."""
 
-import contextlib
 import logging
 import re
 

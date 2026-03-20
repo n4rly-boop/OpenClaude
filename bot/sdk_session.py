@@ -167,14 +167,10 @@ def _sweep_cancellation_callbacks() -> None:
                     # clear _tasks (the retry condition) and _cancel_handle.
                     scope = getattr(cb, '__self__', None)
                     if scope is not None:
-                        try:
+                        with contextlib.suppress(AttributeError, TypeError):
                             scope._tasks.clear()
-                        except (AttributeError, TypeError):
-                            pass
-                        try:
+                        with contextlib.suppress(AttributeError, TypeError):
                             scope._cancel_handle = None
-                        except (AttributeError, TypeError):
-                            pass
         if removed:
             logger.warning("Swept %d orphaned _deliver_cancellation callbacks", removed)
     except Exception:
@@ -268,11 +264,11 @@ class SDKSession:
         self.client = ClaudeSDKClient(options=options)
         try:
             await asyncio.wait_for(self.client.connect(), timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.hard_kill()
             self.client = None
             self.connected = False
-            raise TimeoutError("SDK connect timed out after 30s")
+            raise TimeoutError("SDK connect timed out after 30s") from None
         except Exception:
             # connect() may have spawned a subprocess before failing —
             # kill it so it doesn't become an orphan

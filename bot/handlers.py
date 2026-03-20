@@ -14,6 +14,8 @@ This module is a thin facade. The actual implementations live in:
 """
 
 # --- Re-exports from extracted modules (for backward compatibility) ---
+# BOT_USERNAME is set from routing module; kept as alias for app.py compatibility
+import bot.routing as _routing  # noqa: E402
 from bot.attachments import (  # noqa: F401
     extract_image_urls as _extract_image_urls,
 )
@@ -43,9 +45,6 @@ from bot.streaming import run_with_streaming  # noqa: F401
 from bot.telegram_sender import (  # noqa: F401
     send_file_group as _send_file_group,
 )
-
-# BOT_USERNAME is set from routing module; kept as alias for app.py compatibility
-import bot.routing as _routing  # noqa: E402
 
 BOT_USERNAME = _routing.BOT_USERNAME
 

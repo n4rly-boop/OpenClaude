@@ -354,7 +354,10 @@ class StreamingSession:
         wait = int(m.group(1)) if m else 30
         self.flood_until = asyncio.get_event_loop().time() + wait
         self._flood_hit_count += 1
-        infra_logger.warning("[STREAM] flood control — backing off %ds (hit #%d)", wait, self._flood_hit_count)
+        infra_logger.warning(
+            "[STREAM] flood control — backing off %ds (hit #%d)",
+            wait, self._flood_hit_count,
+        )
 
     async def _update_live(self, text: str) -> None:
         """Update the live-streaming message with accumulated text."""
@@ -409,7 +412,8 @@ class StreamingSession:
         # Throttle display updates (but not overflow checks above)
         # After flood events, double the interval for each hit to prevent oscillation
         effective_interval = min(
-            LIVE_EDIT_INTERVAL * (2 ** self._flood_hit_count) if self._flood_hit_count else LIVE_EDIT_INTERVAL,
+            LIVE_EDIT_INTERVAL * (2 ** self._flood_hit_count)
+            if self._flood_hit_count else LIVE_EDIT_INTERVAL,
             MAX_FLOOD_BACKOFF_INTERVAL,
         )
         if self.live_msg and (now - self.last_live_edit) < effective_interval:
@@ -582,7 +586,6 @@ class StreamingSession:
         if not file_segments and self.live_text and "\U0001f4ce" in self.live_text:
             fallback_segments = split_file_segments(self.live_text, workspace_path)
             file_segments = [s for s in fallback_segments if isinstance(s, FileSegment)]
-        cleaned_response = clean_file_markers(response_text)
 
         # Extract LaTeX blocks early so the guard below won't skip them
         from bot.latex_render import extract_latex_blocks

@@ -73,6 +73,7 @@ def main() -> None:
         import os
 
         import psutil
+
         from bot.sdk_session import _sweep_cancellation_callbacks
 
         bot_pid = os.getpid()
@@ -96,7 +97,7 @@ def main() -> None:
                     _sweep_cancellation_callbacks()
 
                     logger.warning(
-                        "High CPU usage detected: %.1f%% (threads=%d, mem=%.0fMB) — swept callbacks",
+                        "High CPU detected: %.1f%% (threads=%d, mem=%.0fMB) — swept",
                         cpu_percent, num_threads, mem_mb
                     )
                     infra_logger.warning(

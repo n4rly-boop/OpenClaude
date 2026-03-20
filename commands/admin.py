@@ -256,14 +256,14 @@ async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     _cfg.ADMIN_USER_ID = new_settings.admin_user_id
 
     # Clear chat-settings cache so it re-reads from disk
-    from commands.config import _load_settings as _reload_chat_settings
     import commands.config as _ccfg
     _ccfg._settings_cache = None
     _ccfg._settings_mtime = 0.0
 
     infra_logger.info("Settings reloaded by user %d", user.id)
     await update.message.reply_text(
-        f"Settings reloaded.\nModel: <code>{html.escape(new_settings.claude_model or 'default')}</code>",
+        f"Settings reloaded.\nModel: "
+        f"<code>{html.escape(new_settings.claude_model or 'default')}</code>",
         parse_mode=ParseMode.HTML,
         message_thread_id=thread_id or None,
     )

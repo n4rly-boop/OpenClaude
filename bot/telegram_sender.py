@@ -60,7 +60,7 @@ async def send_file_group(
         try:
             media = [
                 type_map[f.media_type](media=h, caption=f.caption or None)
-                for f, h in zip(files, handles)
+                for f, h in zip(files, handles, strict=False)
             ]
             try:
                 await bot.send_media_group(
