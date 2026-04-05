@@ -98,6 +98,11 @@ You have access to these tools when invoked via the Telegram bot:
 - **Usage:** `pinchtab "<url>"` (CLI) or `pinchtab-fetch "<url>"` (returns page text)
 - **API endpoints:** `POST /navigate` (param: `newTab: bool`, returns `tabId`), `GET /text`, `GET /snapshot`, `GET /screenshot?tabId=X` (returns `{"base64": "..."}` JSON), `POST /click`, `POST /type`
 - **Tab cleanup:** `GET localhost:{cdpPort}/json/close/{tabId}` via Chrome CDP
+- **⚠️ ALWAYS close tabs when done.** Every `newTab: true` must be paired with a close or the renderer process leaks RAM\/CPU indefinitely. Pattern:
+  ```bash
+  CDP_PORT=$(ss -tlnp | grep -oP "127\.0\.0\.1:\\K\\d+" | while read p; do curl -s --max-time 1 http://localhost:$p/json/version 2>/dev/null | grep -q Chrome && echo $p && break; done)
+  curl http://localhost:$CDP_PORT/json/close/{tabId}
+  ```
 
 ## Sending Files to the User
 
