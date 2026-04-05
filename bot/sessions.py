@@ -90,7 +90,7 @@ def get_usage(chat_id: int, thread_id: int, user_id: int) -> dict | None:
 # Context percentage helper
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CONTEXT_WINDOW = 1_000_000
+_DEFAULT_CONTEXT_WINDOW = 200_000
 
 
 def get_context_pct(chat_id: int, thread_id: int, user_id: int) -> tuple[float, int, int] | None:
